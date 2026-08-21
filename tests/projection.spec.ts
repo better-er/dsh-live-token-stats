@@ -7,9 +7,12 @@ import {
   type ActiveStepState,
   type ThroughputState,
 } from '../src/projection.ts'
+import { tokenCount } from '../src/tokenizer/bpe.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
-const SPEC: Readonly<EstimatorSpec> = ESTIMATOR_DEFAULTS
+// 旧行为测试显式用 density 模式（数值断言不变）；bpe 模式在下方专项用例验证。
+const SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'density' }
+const BPE_SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'bpe' }
 
 /** Build a minimal session event. seq is not used by the folds under test. */
 function event(seq: number, type: string, data: unknown, time = 1000 + seq * 10): SessionEvent {
@@ -32,8 +35,8 @@ function stepEnd(seq: number, turn = 0, step = 0, time = 1000 + seq * 10): Sessi
   return event(seq, 'step/end', { turn, step }, time)
 }
 
-const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null }
-const THROUGHPUT_INIT: ThroughputState = { samples: [], totalTokens: 0, currentRate: undefined }
+const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null, inc: { buffer: '', counted: 0 } }
+const THROUGHPUT_INIT: ThroughputState = { samples: [], totalTokens: 0, currentRate: undefined, inc: { buffer: '', counted: 0 } }
 
 describe('activeStepApply', () => {
   it('opens a step on step/start', () => {
@@ -117,7 +120,7 @@ describe('createLiveTokenStatsDefinition', () => {
   it('is a replayable projection with init/apply/wire/stateSchema/stateVersion', () => {
     const def = createLiveTokenStatsDefinition(SPEC)
     expect(def.key).toBe('liveTokenStats')
-    expect(def.stateVersion).toBe(2)
+    expect(def.stateVersion).toBe(3)
     const init = def.init()
     expect(def.wire!.view(init)).toEqual({ active: null, lastSettled: null })
     // 持久化状态必须能过 stateSchema(缓存恢复的前提)
@@ -134,5 +137,34 @@ describe('createLiveTokenStatsDefinition', () => {
     const parsed = def.wire!.viewSchema.parse(value)
     expect(parsed.active!.estimatedTokens).toBe(2)
     expect(parsed.active!.actualTokens).toBe(9)
+  })
+})
+
+describe('BPE 模式（tokenizerMode: bpe）', () => {
+  it('activeStep 的估算累计与真实 BPE 切分一致（跨帧合并）', () => {
+    let s = activeStepApply(ACTIVE_INIT, stepStart(0, 0, 0, 1000), BPE_SPEC)
+    // '发展' 拆成两帧喂入：增量 buffer 合并后应与整句 tokenCount 一致
+    s = activeStepApply(s, textDelta(1, '发展', 1010), BPE_SPEC)
+    s = activeStepApply(s, textDelta(2, '中国特色社会主义', 1020), BPE_SPEC)
+    expect(s.active!.estimatedTokens).toBe(tokenCount('发展中国特色社会主义'))
+  })
+
+  it('throughput 的样本 token 数与真实 BPE 切分一致', () => {
+    let t = throughputApply(THROUGHPUT_INIT, textDelta(1, '苹果 banana 123', 1000), BPE_SPEC)
+    // 单帧 total 增量 = 全文 token 数
+    expect(t.samples[0].tokens).toBe(tokenCount('苹果 banana 123'))
+  })
+
+  it('持久化状态含增量字段且可过 stateSchema（可重放）', () => {
+    const def = createLiveTokenStatsDefinition(BPE_SPEC)
+    let state = def.init()
+    state = def.apply(state, stepStart(0, 0, 0, 1000))
+    state = def.apply(state, textDelta(1, '你好 world', 1010))
+    expect(def.stateSchema.parse(state)).toEqual(state)
+    // 重放：相同事件序列得到相同状态
+    const init2 = def.init()
+    const replayed = def.apply(init2, stepStart(0, 0, 0, 1000))
+    const replayed2 = def.apply(replayed, textDelta(1, '你好 world', 1010))
+    expect(replayed2).toEqual(state)
   })
 })

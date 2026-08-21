@@ -16,6 +16,13 @@ import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { estimateTextTokens, type EstimatorSpec } from './estimator.ts'
+import { tokenCount } from './tokenizer/bpe.ts'
+import {
+  EMPTY_INCREMENTAL,
+  incrementalFeed,
+  incrementalTotal,
+  type IncrementalState,
+} from './tokenizer/incremental.ts'
 
 /** Declare our key in the session-projection map tables (merge-extensible). */
 declare module '@deepseek-ai/dsh-session-projection/types' {
@@ -68,6 +75,24 @@ export interface LiveTokenStatsState {
 export interface ActiveStepState {
   active: LiveTokenStatsProjection['active']
   lastSettled: LiveTokenStatsProjection['lastSettled']
+  /** BPE 增量切分状态（纯 JSON；density 模式保持初始态不增长）。 */
+  inc: IncrementalState
+}
+
+/** delta 文本计数：bpe 走增量 BPE 切分（与官方口径一致），density 走双密度盲估。 */
+function countDeltaTokens(
+  text: string,
+  spec: Readonly<EstimatorSpec>,
+  inc: IncrementalState,
+): { added: number; inc: IncrementalState } {
+  if (spec.tokenizerMode === 'bpe') {
+    // 阈值口径：取 total 的增量（含尾段中尚未定界的 token）——
+    // 连续中文无段边界时会全部滞留在尾段，added(已结算) 恒 0，不适用。
+    const r = incrementalFeed(inc, text)
+    const delta = incrementalTotal(r.state) - incrementalTotal(inc)
+    return { added: delta, inc: r.state }
+  }
+  return { added: estimateTextTokens(text, spec), inc }
 }
 
 /** Whether a chunk is a token-bearing delta. */
@@ -84,7 +109,20 @@ function deltaText(chunk: StreamChunk): string {
   return ''
 }
 
-const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null }
+/**
+ * 工具调用名（tool-call-delta 首个片段一次性携带）的 token 数。
+ * 官方会把模型生成的 tool-call JSON 完整计入 output，其中 `name` 字段
+ * 是模型生成内容，本地可拿到；`argumentsDelta` 已由 deltaText 计入，
+ * 这里补上 name 缺口（消息外壳/模板结构费不补偿——见 DESIGN §10.x）。
+ */
+function toolCallNameTokens(chunk: StreamChunk, spec: Readonly<EstimatorSpec>): number {
+  if (chunk.type !== 'tool-call-delta') return 0
+  const name = chunk.name
+  if (typeof name !== 'string' || name.length === 0) return 0
+  return spec.tokenizerMode === 'bpe' ? tokenCount(name) : estimateTextTokens(name, spec)
+}
+
+const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null, inc: { ...EMPTY_INCREMENTAL } }
 
 /** Pure fold for the active-step metric unit. */
 export function activeStepApply(
@@ -97,6 +135,7 @@ export function activeStepApply(
   if (type === 'step/start') {
     return {
       ...state,
+      inc: { ...EMPTY_INCREMENTAL },
       active: {
         turn: data.turn,
         step: data.step,
@@ -126,13 +165,17 @@ export function activeStepApply(
     }
     if (!isDeltaChunk(chunk) || state.active.exact) return state
     const text = deltaText(chunk)
-    if (text.length === 0) return state
+    const nameTokens = toolCallNameTokens(chunk, spec)
+    if (text.length === 0 && nameTokens === 0) return state
+    const { added, inc } =
+      text.length > 0 ? countDeltaTokens(text, spec, state.inc) : { added: 0, inc: state.inc }
     return {
       ...state,
+      inc,
       active: {
         ...state.active,
         firstTokenTime: state.active.firstTokenTime === null ? event.time : state.active.firstTokenTime,
-        estimatedTokens: state.active.estimatedTokens + estimateTextTokens(text, spec),
+        estimatedTokens: state.active.estimatedTokens + added + nameTokens,
       },
     }
   }
@@ -155,6 +198,7 @@ export function activeStepApply(
   if (type === 'step/end') {
     if (state.active.turn === data.turn && state.active.step === data.step) {
       return {
+        inc: { ...EMPTY_INCREMENTAL },
         active: null,
         lastSettled: {
           turn: data.turn,
@@ -173,7 +217,7 @@ export function activeStepApply(
 
   // A non-completed turn/end abandons its unsettled estimate.
   if (type === 'turn/end' && data.reason && data.reason.kind !== 'completed') {
-    return { ...state, active: null }
+    return { ...state, inc: { ...EMPTY_INCREMENTAL }, active: null }
   }
 
   return state
@@ -196,9 +240,11 @@ export interface ThroughputState {
   totalTokens: number
   /** 滑动窗口内的实时速率;窗口为空时无值(JSON 序列化时字段缺省)。 */
   currentRate?: number
+  /** BPE 增量切分状态（纯 JSON；density 模式保持初始态）。 */
+  inc: IncrementalState
 }
 
-const THROUGHPUT_INIT: ThroughputState = { samples: [], totalTokens: 0, currentRate: undefined }
+const THROUGHPUT_INIT: ThroughputState = { samples: [], totalTokens: 0, currentRate: undefined, inc: { ...EMPTY_INCREMENTAL } }
 
 /** Slide the window at `asOf` and recompute the live rate. Pure. */
 function slideWindow(state: ThroughputState, asOf: number, spec: Readonly<EstimatorSpec>): ThroughputState {
@@ -214,7 +260,7 @@ function slideWindow(state: ThroughputState, asOf: number, spec: Readonly<Estima
     const spanMs = Math.max(1, asOf - samples[0].time)
     currentRate = total / (spanMs / 1000)
   }
-  return { samples, totalTokens: total, currentRate }
+  return { samples, totalTokens: total, currentRate, inc: state.inc }
 }
 
 /** Pure fold for the throughput metric unit. */
@@ -224,11 +270,14 @@ export function throughputApply(
   spec: Readonly<EstimatorSpec>,
 ): ThroughputState {
   if (event.type === 'assistant/chunk' && isDeltaChunk(event.data.chunk)) {
-    const text = deltaText(event.data.chunk)
-    if (text.length === 0) return state
-    const tokens = estimateTextTokens(text, spec)
+    const chunk = event.data.chunk
+    const text = deltaText(chunk)
+    const nameTokens = toolCallNameTokens(chunk, spec)
+    if (text.length === 0 && nameTokens === 0) return state
+    const { added, inc } =
+      text.length > 0 ? countDeltaTokens(text, spec, state.inc) : { added: 0, inc: state.inc }
     return slideWindow(
-      { samples: [...state.samples, { time: event.time, tokens }], totalTokens: state.totalTokens + tokens, currentRate: state.currentRate },
+      { samples: [...state.samples, { time: event.time, tokens: added + nameTokens }], totalTokens: state.totalTokens + added + nameTokens, currentRate: state.currentRate, inc },
       event.time,
       spec,
     )
@@ -270,6 +319,11 @@ const viewSchema = z.object({
   tokensPerSecond: z.number().nonnegative().optional(),
 }).strict()
 
+const incSchema = z.object({
+  buffer: z.string(),
+  counted: z.number().nonnegative(),
+}).strict()
+
 const throughputSampleSchema = z.object({
   time: z.number(),
   tokens: z.number().nonnegative(),
@@ -279,11 +333,13 @@ const throughputStateSchema = z.object({
   samples: z.array(throughputSampleSchema),
   totalTokens: z.number().nonnegative(),
   currentRate: z.number().nonnegative().optional(),
+  inc: incSchema,
 }).strict()
 
 const activeStepStateSchema = z.object({
   active: activeSchema.nullable(),
   lastSettled: lastSettledSchema.nullable(),
+  inc: incSchema,
 }).strict()
 
 /** Validates persisted fold state before it seeds a cache restore. */
@@ -333,6 +389,6 @@ export function createLiveTokenStatsDefinition(
       }),
     },
     // Bump only when serialized state fields or fold semantics change.
-    stateVersion: 2,
+    stateVersion: 3,
   }
 }

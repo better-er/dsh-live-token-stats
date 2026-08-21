@@ -47,6 +47,16 @@ describe('resolveSpec', () => {
     expect(spec.asciiTokenPerChar).toBe(ESTIMATOR_DEFAULTS.asciiTokenPerChar)
     expect(spec.cjkTokenPerChar).toBe(ESTIMATOR_DEFAULTS.cjkTokenPerChar)
     expect(spec.rateWindowMs).toBe(ESTIMATOR_DEFAULTS.rateWindowMs)
+    expect(spec.tokenizerMode).toBe('bpe')
+  })
+
+  it('accepts an explicit density mode (legacy behavior)', () => {
+    const spec = resolveSpec({ tokenizerMode: 'density' })
+    expect(spec.tokenizerMode).toBe('density')
+  })
+
+  it('rejects invalid tokenizerMode', () => {
+    expect(() => resolveSpec({ tokenizerMode: 'foo' } as unknown as EstimatorConfig)).toThrow(/tokenizerMode/)
   })
 
   it('ignores unknown keys', () => {

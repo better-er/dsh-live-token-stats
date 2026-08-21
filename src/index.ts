@@ -30,6 +30,13 @@ export const inject = ['sessionProjections', 'connection']
 export interface Config extends EstimatorConfig {
   /** Master switch for the whole capability. */
   enabled?: boolean
+  /**
+   * 诊断日志开关（默认关，发布零污染）。
+   * 开启后在 ~/.dsh/dsh-live-token-stats-debug.jsonl 记录每流完整 delta 序列
+   * 与官方 usage 对照（定位估算偏差用）；关闭时拦截器零开销。也可用环境变量
+   * DSH_LIVE_TOKEN_STATS_DEBUG=1 开启，免改配置。
+   */
+  debug?: boolean
 }
 
 /** Runtime schema for {@link Config} (default applied by the loader). */
@@ -38,6 +45,10 @@ export const Config: z<Config> = z.object({
   asciiTokenPerChar: z.number().min(0.01).default(ESTIMATOR_DEFAULTS.asciiTokenPerChar),
   cjkTokenPerChar: z.number().min(0.01).default(ESTIMATOR_DEFAULTS.cjkTokenPerChar),
   rateWindowMs: z.number().min(0).default(ESTIMATOR_DEFAULTS.rateWindowMs),
+  // 真实 BPE 分词（默认，用户拍板）；'density' 回退到双密度盲估
+  // schemastery 无 z.enum，用 union 实现二选一
+  tokenizerMode: z.union([z.const('bpe'), z.const('density')]).default(ESTIMATOR_DEFAULTS.tokenizerMode),
+  debug: z.boolean().default(false),
 })
 
 /**
@@ -48,8 +59,10 @@ export const Config: z<Config> = z.object({
 export function apply(ctx: Context, config: Config = {}): void {
   if (config.enabled === false) return
   // `enabled` 是插件开关(由 loader 注入默认值),并非 estimator 配置,剥离后再解析
-  const { enabled: _enabled, ...estimatorConfig } = config
+  const { enabled: _enabled, debug: debugConfig, ...estimatorConfig } = config
   const spec = resolveSpec(estimatorConfig)
+  // 调试日志：配置开关优先，环境变量兜底（免改配置的开发快捷方式）。
+  const debug = debugConfig === true || process.env.DSH_LIVE_TOKEN_STATS_DEBUG === '1'
 
   // 1) Replayable settled projection (session events).
   ctx.inject(['sessionProjections'], (projectionCtx) => {
@@ -57,7 +70,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   })
 
   // 2) Live real-time channel (llm/stream intercept + RPC serve).
-  const live = installHostLiveStream(ctx, spec)
+  const live = installHostLiveStream(ctx, spec, debug)
   ctx.effect(() => live.dispose, 'dsh-live-token-stats: live stream teardown')
 }
 

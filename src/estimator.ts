@@ -11,6 +11,9 @@
  * @module dsh-live-token-stats/estimator
  */
 
+/** 计数模式：bpe = 真实 BPE 分词（默认，用户拍板）；density = 旧的双密度盲估。 */
+export type TokenizerMode = 'bpe' | 'density'
+
 /** Default-density estimator settings (also the source of the Config schema). */
 export interface EstimatorSpec {
   /** ASCII characters per token fraction. */
@@ -19,6 +22,8 @@ export interface EstimatorSpec {
   readonly cjkTokenPerChar: number
   /** Sliding window (ms) for the live TPS rate. */
   readonly rateWindowMs: number
+  /** 计数模式：bpe（真实 BPE 切分）或 density（双密度盲估）。 */
+  readonly tokenizerMode: TokenizerMode
 }
 
 /** Allow partial deployment-supplied config; resolved with defaults applied. */
@@ -29,6 +34,7 @@ export const ESTIMATOR_DEFAULTS: Readonly<EstimatorSpec> = Object.freeze({
   asciiTokenPerChar: 0.3,
   cjkTokenPerChar: 0.6,
   rateWindowMs: 3000,
+  tokenizerMode: 'bpe',
 })
 
 /**
@@ -52,6 +58,9 @@ export function resolveSpec(config: EstimatorConfig = {}): Readonly<EstimatorSpe
   }
   if (!Number.isFinite(spec.rateWindowMs) || spec.rateWindowMs < 0) {
     throw new Error('dsh-live-token-stats: rateWindowMs must be a non-negative number')
+  }
+  if (spec.tokenizerMode !== 'bpe' && spec.tokenizerMode !== 'density') {
+    throw new Error('dsh-live-token-stats: tokenizerMode must be "bpe" or "density"')
   }
   return Object.freeze({ ...spec })
 }

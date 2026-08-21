@@ -130,6 +130,26 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
   const waiting = active !== null && active.firstTokenTime === null
   useWaitingTick(waiting ? active.startTime : null)
 
+  // —— 临时诊断：每次结算打一行「估算/实际/偏差」对照（devtools console），定位后移除 ——
+  useEffect(() => {
+    if (lastSettled === null) return
+    const { turn, step, estimatedTokens, actualTokens, startTime, endTime } = lastSettled
+    console.info(
+      '[dsh-live-token-stats] settled',
+      JSON.stringify({
+        turn,
+        step,
+        est: estimatedTokens,
+        actual: actualTokens ?? null,
+        gapPct:
+          typeof actualTokens === 'number' && actualTokens > 0
+            ? Math.round(((estimatedTokens - actualTokens) / actualTokens) * 100)
+            : null,
+        durMs: endTime - startTime,
+      }),
+    )
+  }, [lastSettled])
+
   const groups: string[] = []
 
   if (active !== null && active.firstTokenTime !== null) {

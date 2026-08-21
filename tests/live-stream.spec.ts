@@ -14,7 +14,8 @@ import { ESTIMATOR_DEFAULTS, type EstimatorSpec } from '../src/estimator.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { CallId } from '@deepseek-ai/dsh-llm/brand'
 
-const SPEC: Readonly<EstimatorSpec> = ESTIMATOR_DEFAULTS
+const SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'density' }
+const BPE_SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'bpe' }
 
 function textDelta(text: string): StreamChunk {
   return { type: 'text-delta', index: 0, text }
@@ -38,8 +39,8 @@ describe('LiveTokenRateTracker', () => {
     const t = new LiveTokenRateTracker(SPEC)
     // A usage/block-start chunk carries no output tokens.
     t.fold(SESSION, { type: 'block-start', index: 0, blockType: 'text' }, 1000)
-    // An empty tool-call frame (the "brewing" empty argumentsDelta) counts nothing.
-    t.fold(SESSION, toolCallDelta(''), 1000)
+    // A genuinely empty frame (no name, no id, empty argumentsDelta) counts nothing.
+    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId(''), argumentsDelta: '' }, 1000)
     expect(t.snapshot(SESSION).tokensPerSecond).toBeUndefined()
   })
 
@@ -103,6 +104,24 @@ describe('LiveTokenRateTracker', () => {
     // count (the user's directive: tool arguments are also streamed output).
     t.fold(SESSION, toolCallDelta('{"path": '), 1000)
     t.fold(SESSION, toolCallDelta('"C:\\\\tmp\\\\a.json", "content": "abc"'), 1100)
+    const snap = t.snapshot(SESSION)
+    expect(snap.tokensPerSecond).toBeDefined()
+    expect(snap.tokensPerSecond!).toBeGreaterThan(0)
+  })
+
+  it('BPE 模式：分片参数的增量计数与真实分词一致', () => {
+    const t = new LiveTokenRateTracker(BPE_SPEC)
+    t.fold(SESSION, toolCallDelta('{"path": "C:/tmp/'), 1000)
+    t.fold(SESSION, toolCallDelta('a.json", "content": "你好世界"}'), 1100)
+    const snap = t.snapshot(SESSION)
+    expect(snap.tokensPerSecond).toBeDefined()
+    expect(snap.tokensPerSecond!).toBeGreaterThan(0)
+  })
+
+  it('BPE 模式：tool-call 首帧携带的 name 计入输出', () => {
+    const t = new LiveTokenRateTracker(BPE_SPEC)
+    // 真实 DeepSeek 流的首帧形态：name + 空 arguments（官方统计工具名 token）。
+    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write_file', argumentsDelta: '' }, 1000)
     const snap = t.snapshot(SESSION)
     expect(snap.tokensPerSecond).toBeDefined()
     expect(snap.tokensPerSecond!).toBeGreaterThan(0)
