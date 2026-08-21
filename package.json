@@ -1,0 +1,73 @@
+{
+  "name": "dsh-live-token-stats",
+  "version": "0.1.0",
+  "description": "DSH Web 插件：在 composer 下方渲染实时 token 状态带，显示流式 TPS、输出 token 与首字延迟，并对比上次 step 的估算与实际偏差；纯插件自包含，不改 DSH 源码",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "scripts": {
+    "build": "tsc -b && tsdown",
+    "prepare": "tsdown",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest run"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0",
+    "react": "^18.2.0"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": ">=3.18.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": ">=4.0.0",
+    "@deepseek-ai/dsh-client-connection": "0.1.1-rc.1",
+    "@deepseek-ai/dsh-client-runtime": "0.1.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.1.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": "0.1.1-rc.1",
+    "@deepseek-ai/dsh-host-apiproxy": "0.1.1-rc.1",
+    "@deepseek-ai/dsh-llm": "0.1.1-rc.1",
+    "@deepseek-ai/dsh-session": "0.1.1-rc.1",
+    "@deepseek-ai/dsh-session-projection": "0.1.1-rc.1",
+    "@deepseek-ai/dsh-session-stats": "0.1.1-rc.1",
+    "@deepseek-ai/dsh-token-meter": "0.1.1-rc.1",
+    "@types/node": "^22.0.0",
+    "@types/react": "~18.3.1",
+    "react": "^18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^5.9.3",
+    "vite-tsconfig-paths": "^6.1.1",
+    "vitest": "^4.1.1"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/index.d.ts",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "license": "MIT"
+}

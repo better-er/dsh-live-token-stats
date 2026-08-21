@@ -1,0 +1,15 @@
+# 依赖与产物
+node_modules/
+lib/
+dist/
+
+# 内部私有文档(不对外、不跟踪)
+.private/
+
+# 构建缓存
+*.tsbuildinfo
+
+# 日志与杂项
+*.log
+.DS_Store
+Thumbs.db

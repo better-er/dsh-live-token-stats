@@ -1,0 +1,10 @@
+# dsh-live-token-stats bundle patch: mount the real-time token-stats plugin.
+#
+# Applied when this bundle appears in a profile's dsh.profile.bundles list.
+# The host half (package root) registers the `liveTokenStats` session
+# projection against the official sessionProjections registry; the browser
+# half (dsh.client) renders the live stream readout in the composer dock.
+
+- insert:
+    - id: dsh-live-token-stats
+      name: dsh-live-token-stats
