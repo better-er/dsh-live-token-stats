@@ -35,8 +35,8 @@ function stepEnd(seq: number, turn = 0, step = 0, time = 1000 + seq * 10): Sessi
   return event(seq, 'step/end', { turn, step }, time)
 }
 
-const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null, inc: { buffer: '', counted: 0 } }
-const THROUGHPUT_INIT: ThroughputState = { samples: [], totalTokens: 0, currentRate: undefined, inc: { buffer: '', counted: 0 } }
+const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null, inc: { buffer: '', counted: 0 }, esc: { tail: '' } }
+const THROUGHPUT_INIT: ThroughputState = { samples: [], totalTokens: 0, currentRate: undefined, inc: { buffer: '', counted: 0 }, esc: { tail: '' } }
 
 describe('activeStepApply', () => {
   it('opens a step on step/start', () => {
@@ -120,7 +120,7 @@ describe('createLiveTokenStatsDefinition', () => {
   it('is a replayable projection with init/apply/wire/stateSchema/stateVersion', () => {
     const def = createLiveTokenStatsDefinition(SPEC)
     expect(def.key).toBe('liveTokenStats')
-    expect(def.stateVersion).toBe(3)
+    expect(def.stateVersion).toBe(4)
     const init = def.init()
     expect(def.wire!.view(init)).toEqual({ active: null, lastSettled: null })
     // 持久化状态必须能过 stateSchema(缓存恢复的前提)
@@ -166,5 +166,51 @@ describe('BPE 模式（tokenizerMode: bpe）', () => {
     const replayed = def.apply(init2, stepStart(0, 0, 0, 1000))
     const replayed2 = def.apply(replayed, textDelta(1, '你好 world', 1010))
     expect(replayed2).toEqual(state)
+  })
+})
+
+describe('BPE 模式：tool-call 参数反转义（官方按解码后内容计费）', () => {
+  /** 构造 tool-call-delta 会话事件。 */
+  function toolCallDelta(seq: number, argumentsDelta: string, time = 1000 + seq * 10, turn = 0, step = 0): SessionEvent {
+    return event(seq, 'assistant/chunk', {
+      turn, step,
+      chunk: { type: 'tool-call-delta', index: 0, id: 'call-1', name: 'write', argumentsDelta },
+    })
+  }
+
+  it('单帧：转义原文按解码后内容计数，而非原文 BPE', () => {
+    let s = activeStepApply(ACTIVE_INIT, stepStart(0, 0, 0, 1000), BPE_SPEC)
+    // 参数原文含 JSON 转义：\n 是 2 字符，解码后是 1 换行符
+    s = activeStepApply(s, toolCallDelta(1, '{"content": "a\\nb"}'), BPE_SPEC)
+    const decoded = '{"content": "a\nb"}'
+    // 不再等于原文 tokenCount（旧行为），而等于解码后 tokenCount + name
+    expect(s.active!.estimatedTokens).toBe(tokenCount(decoded) + tokenCount('write'))
+  })
+
+  it('跨帧：悬空尾部跨帧合并后与整段解码一致', () => {
+    const whole = '{"content": "第\\n二\\t行\\u4f60"}'
+    let s = activeStepApply(ACTIVE_INIT, stepStart(0, 0, 0, 1000), BPE_SPEC)
+    // 逐字符切帧喂入（极端流式：转义序列被拆得最碎）。
+    // 真实流语义：name 只在首个 tool-call 片段携带（translate.ts），后续帧不带。
+    for (let i = 0; i < whole.length; i += 1) {
+      const name = i === 0 ? 'write' : undefined
+      s = activeStepApply(s, event(1, 'assistant/chunk', {
+        turn: 0, step: 0,
+        chunk: { type: 'tool-call-delta', index: 0, id: 'call-1', ...name !== undefined ? { name } : {}, argumentsDelta: whole[i] },
+      }), BPE_SPEC)
+    }
+    expect(s.active!.estimatedTokens).toBe(tokenCount('{"content": "第\n二\t行你"}') + tokenCount('write'))
+  })
+
+  it('纯文本 delta 不受反转义影响（text-delta 不是 JSON 转义原文）', () => {
+    let s = activeStepApply(ACTIVE_INIT, stepStart(0, 0, 0, 1000), BPE_SPEC)
+    s = activeStepApply(s, textDelta(1, 'a\\nb', 1010), BPE_SPEC)
+    // text-delta 的内容就是原样文本，反斜杠-n 保持 2 字符（与旧行为一致）
+    expect(s.active!.estimatedTokens).toBe(tokenCount('a\\nb'))
+  })
+
+  it('throughput 同样按解码后内容计数', () => {
+    let t = throughputApply(THROUGHPUT_INIT, toolCallDelta(1, '{"content": "a\\nb"}'), BPE_SPEC)
+    expect(t.samples[0].tokens).toBe(tokenCount('{"content": "a\nb"}') + tokenCount('write'))
   })
 })

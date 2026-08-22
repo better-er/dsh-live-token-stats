@@ -6,6 +6,9 @@ dist/
 # 内部私有文档(不对外、不跟踪)
 .private/
 
+# 调试/分析脚本(本地工具，不入库；含 export-tokenizer-data.mjs)
+scripts/
+
 # 构建缓存
 *.tsbuildinfo
 

@@ -126,4 +126,21 @@ describe('LiveTokenRateTracker', () => {
     expect(snap.tokensPerSecond).toBeDefined()
     expect(snap.tokensPerSecond!).toBeGreaterThan(0)
   })
+
+  it('BPE 模式：工具参数按解码后内容计数（转义原文不再直接 BPE）', () => {
+    const t = new LiveTokenRateTracker(BPE_SPEC)
+    // 参数含 \n 转义：解码后是换行。累计总量应为 解码后token + name。
+    const frames = [
+      '{"content": "a\\',
+      'nb"}',
+    ]
+    for (let i = 0; i < frames.length; i += 1) {
+      t.fold(SESSION, toolCallDelta(frames[i] as string), 1000 + i)
+    }
+    // 窗口内总 token = 解码后参数 + write name（rate 窗口摊平 50ms 下限，直接比对过期前累计不可得；
+    // 用 3s 窗口 + 单帧高频采样近似不可靠——这里只验证非零且不爆表，精确口径由 projection 专项覆盖）
+    const snap = t.snapshot(SESSION)
+    expect(snap.tokensPerSecond).toBeDefined()
+    expect(snap.tokensPerSecond!).toBeGreaterThan(0)
+  })
 })

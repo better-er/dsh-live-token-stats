@@ -43,6 +43,7 @@ import {
   incrementalTotal,
   type IncrementalState,
 } from './tokenizer/incremental.ts'
+import { EMPTY_UNESCAPE, unescapeFeed, type UnescapeState } from './tokenizer/unescape.ts'
 
 /**
  * 工具调用名（tool-call-delta 首个片段一次性携带）的 token 数。
@@ -111,6 +112,8 @@ interface StreamDebugStats {
   chars: { text: number; reasoning: number; tool: number }
   /** 本流的 BPE 增量切分状态（连续中文时 total 差分才有意义）。 */
   inc: IncrementalState
+  /** 本流的 tool-call 反转义悬空尾部（与 tracker/投影同口径）。 */
+  esc: UnescapeState
   /** 本流第一次出现 usage chunk 时的 BPE 累计（null = 流内无 usage）。 */
   bpeAtUsage: number | null
   /** 流内最后一个 usage.outputTokens（null = 流内无 usage）。 */
@@ -135,6 +138,8 @@ interface RateCell {
   updatedAt: number
   /** 该会话的 BPE 增量切分状态（density 模式保持初始态）。 */
   inc: IncrementalState
+  /** tool-call 参数反转义的悬空尾部（跨帧；wall-clock 宿主态，不需重放）。 */
+  esc: UnescapeState
 }
 
 /** The live snapshot served to the client for one session. */
@@ -146,7 +151,7 @@ export interface LiveTokenSnapshot {
 }
 
 const INITIAL_RATE_CELL = (): RateCell => ({
-  samples: [], rate: undefined, updatedAt: 0, inc: { ...EMPTY_INCREMENTAL },
+  samples: [], rate: undefined, updatedAt: 0, inc: { ...EMPTY_INCREMENTAL }, esc: { ...EMPTY_UNESCAPE },
 })
 
 /**
@@ -171,18 +176,28 @@ export class LiveTokenRateTracker {
       this.cells.set(sessionId, cell)
     }
     let tokensAdded = nameTokens
+    // 工具参数先反转义再计数：官方按解码后的实际内容计费，delta 是 JSON 转义原文
+    // （DESIGN §10.6；跨帧悬空尾部在 cell.esc 上）。
+    let esc = cell.esc
+    let countText = text
+    if (chunk.type === 'tool-call-delta' && text.length > 0) {
+      const r = unescapeFeed(esc, text)
+      countText = r.text
+      esc = r.state
+    }
     let inc = cell.inc
-    if (text.length > 0) {
+    if (countText.length > 0) {
       if (this.spec.tokenizerMode === 'bpe') {
-        const r = incrementalFeed(inc, text)
+        const r = incrementalFeed(inc, countText)
         // 实时口径：取 total 增量（含尾段未定界 token；连续中文停在尾段时 added 恒 0）
         tokensAdded += incrementalTotal(r.state) - incrementalTotal(inc)
         inc = r.state
       } else {
-        tokensAdded += estimateTextTokens(text, this.spec)
+        tokensAdded += estimateTextTokens(countText, this.spec)
       }
     }
     cell.inc = inc
+    cell.esc = esc
     cell.samples.push({ time: timeMs, tokens: tokensAdded })
     this.recompute(cell, timeMs)
   }
@@ -271,6 +286,7 @@ export function installHostLiveStream(
             model: (options as { model?: string }).model,
             chars: { text: 0, reasoning: 0, tool: 0 },
             inc: { ...EMPTY_INCREMENTAL },
+            esc: { ...EMPTY_UNESCAPE },
             bpeAtUsage: null,
             usageOutput: null,
             usageReasoning: null,
@@ -316,7 +332,14 @@ export function installHostLiveStream(
                 if (chunk.type === 'text-delta') d.chars.text += text.length
                 else if (chunk.type === 'reasoning-delta') d.chars.reasoning += text.length
                 else d.chars.tool += text.length
-                d.inc = incrementalFeed(d.inc, text).state
+                // 与 tracker/投影同口径：工具参数反转义后再计数（frames 保留原始 delta 供离线对照）
+                const unesc = chunk.type === 'tool-call-delta' ? unescapeFeed(d.esc, text) : null
+                if (unesc !== null) {
+                  d.esc = unesc.state
+                  d.inc = incrementalFeed(d.inc, unesc.text).state
+                } else {
+                  d.inc = incrementalFeed(d.inc, text).state
+                }
               }
             } else if (chunk.type === 'usage' && chunk.usage && typeof chunk.usage.outputTokens === 'number') {
               d.usageOutput = chunk.usage.outputTokens
