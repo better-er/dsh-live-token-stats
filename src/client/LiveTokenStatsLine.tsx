@@ -69,18 +69,18 @@ export function formatGapPct(estimated: number, actual: number): string {
   return `${sign}${Math.round(pct)}%`
 }
 
-/** Re-render tick: 4x/s while waiting for the first token of the active step. */
+/** Re-render tick: 10x/s while waiting for the first token of the active step. */
 function useWaitingTick(activeStartTime: number | null): void {
   const [, setTick] = useState(0)
   useEffect(() => {
     if (activeStartTime === null) return
-    const id = setInterval(() => setTick((t) => t + 1), 250)
+    const id = setInterval(() => setTick((t) => t + 1), 100)
     return () => clearInterval(id)
   }, [activeStartTime])
 }
 
 /**
- * Live-rate pull: ~4 Hz RPC poll of the host `/dsh-live-token-stats` channel
+ * Live-rate pull: ~10 Hz RPC poll of the host `/dsh-live-token-stats` channel
  * for this session. Returns undefined until the first successful read.
  */
 function useLiveRate(rpc: LiveTokenStatsLineInjected['rpc'], sessionId: string): number | undefined {
@@ -107,7 +107,7 @@ function useLiveRate(rpc: LiveTokenStatsLineInjected['rpc'], sessionId: string):
       }
     }
     void poll()
-    timer = setInterval(() => void poll(), 250)
+    timer = setInterval(() => void poll(), 100)
     return () => {
       disposed = true
       if (timer !== undefined) clearInterval(timer)
