@@ -3,15 +3,18 @@
  * composer dock.
  *
  * Three states, all in Chinese labels per product convention:
- *   - streaming (first token already out):
- *       实时速度 ~189 tok/s | 实时输出 ~1,234 token | 首字延迟 1.2s
- *     the live rate comes from the pure-plugin RPC channel (fed by the
- *     `llm/stream` waterfall intercept); the live output is the heuristic
- *     estimate; 首字延迟 is the recorded TTFT.
+ *   - streaming, first token already out:
+ *       实时速度 ~53.0 tok/s | 已停顿 2.5s | 实时输出 ~2,123 token | 首字延迟 1.2s
+ *     the live rate is the host's windowed rate, TTFT folded into the span
+ *     which slides from step start up to the window size, then stays fixed;
+ *     long stalls expire the window's samples, the host stops emitting a rate
+ *     and the speed readout disappears, leaving 已停顿 ticking.
  *   - waiting for the first token:
- *       上次偏差 +12% | 实时输出 0 token | 等待首字 3.2s
- *     the deviation of the previously settled step plus a live wait timer.
- *   - idle (last step settled):
+ *       准确速度 28.7 tok/s | 估算 2,123 / 实际 1,966 (+8%) | 等待首字 3.2s
+ *     no token has arrived yet, so there is no live speed/output to show;
+ *     the last settled readout is shown instead, with the wait timer ticking
+ *     locally.
+ *   - idle, last step settled:
  *       准确速度 189 tok/s | 估算 1,234 / 实际 1,100 (+12%) | 首字延迟 1.2s
  *     the settled actual rate, the estimate-vs-actual deviation, and the
  *     settled TTFT. No cumulative / global averages are shown any more.
@@ -36,6 +39,8 @@ export interface LiveTokenStatsLineProps extends LiveTokenStatsLineInjected {
 interface LiveRateSnapshot {
   tokensPerSecond?: number
   updatedAt: number
+  stallMs?: number
+  sinceLastMs?: number
 }
 
 // --- Formatting -------------------------------------------------------------
@@ -80,11 +85,15 @@ function useWaitingTick(activeStartTime: number | null): void {
 }
 
 /**
- * Live-rate pull: ~10 Hz RPC poll of the host `/dsh-live-token-stats` channel
- * for this session. Returns undefined until the first successful read.
+ * Live-rate + stall pull: ~10 Hz RPC poll of the host `/dsh-live-token-stats`
+ * channel for this session. The host computes the rate as of each poll, so
+ * the values keep moving while the stream stalls without any local ticking.
  */
-function useLiveRate(rpc: LiveTokenStatsLineInjected['rpc'], sessionId: string): number | undefined {
-  const [rate, setRate] = useState<number | undefined>(undefined)
+function useLiveSnapshot(
+  rpc: LiveTokenStatsLineInjected['rpc'],
+  sessionId: string,
+): { rate: number | undefined; stallMs: number } {
+  const [live, setLive] = useState<{ rate: number | undefined; stallMs: number }>({ rate: undefined, stallMs: 0 })
   useEffect(() => {
     let disposed = false
     let timer: ReturnType<typeof setInterval> | undefined
@@ -98,12 +107,15 @@ function useLiveRate(rpc: LiveTokenStatsLineInjected['rpc'], sessionId: string):
         if (disposed) return
         if (result.ok) {
           const data = (result as { value?: LiveRateSnapshot }).value
-          setRate(typeof data?.tokensPerSecond === 'number' ? data.tokensPerSecond : undefined)
+          setLive({
+            rate: typeof data?.tokensPerSecond === 'number' ? data.tokensPerSecond : undefined,
+            stallMs: data?.stallMs ?? 0,
+          })
         } else {
-          setRate(undefined)
+          setLive({ rate: undefined, stallMs: 0 })
         }
       } catch {
-        if (!disposed) setRate(undefined)
+        if (!disposed) setLive({ rate: undefined, stallMs: 0 })
       }
     }
     void poll()
@@ -113,7 +125,7 @@ function useLiveRate(rpc: LiveTokenStatsLineInjected['rpc'], sessionId: string):
       if (timer !== undefined) clearInterval(timer)
     }
   }, [rpc, sessionId])
-  return rate
+  return live
 }
 
 /** The three-state live readout row; renders nothing when there is nothing live to show. */
@@ -125,7 +137,9 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
   const live = useProjection('liveTokenStats') as LiveTokenStatsProjection | undefined
   const active = live?.active ?? null
   const lastSettled = live?.lastSettled ?? null
-  const liveRate = useLiveRate(rpc, sessionId)
+  const liveSnap = useLiveSnapshot(rpc, sessionId)
+  const liveRate = liveSnap.rate
+  const stallMs = liveSnap.stallMs
 
   const waiting = active !== null && active.firstTokenTime === null
   useWaitingTick(waiting ? active.startTime : null)
@@ -152,36 +166,38 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
 
   const groups: string[] = []
 
-  if (active !== null && active.firstTokenTime !== null) {
-    // 状态一:生成中(已出首字)
-    if (liveRate !== undefined) groups.push(`实时速度 ~${formatTps(liveRate)} tok/s`)
-    const out = active.exact && active.actualTokens !== undefined ? active.actualTokens : active.estimatedTokens
-    groups.push(`实时输出 ~${formatInt(out)} token`)
-    groups.push(`首字延迟 ${formatDuration(active.firstTokenTime - active.startTime)}`)
-  } else if (active !== null && active.firstTokenTime === null) {
-    // 状态二:等待首字(含 TTFT)——参考上次结算,与状态三同款的全量偏差(估算/实际/百分比)
-    if (lastSettled !== null) {
-      if (lastSettled.actualTokens !== undefined) {
-        groups.push(`估算 ${formatInt(lastSettled.estimatedTokens)} / 实际 ${formatInt(lastSettled.actualTokens)} (${formatGapPct(lastSettled.estimatedTokens, lastSettled.actualTokens)})`)
-      } else {
-        groups.push(`估算 ~${formatInt(lastSettled.estimatedTokens)} token`)
-      }
-    }
-    groups.push(`实时输出 ${formatInt(active.estimatedTokens)} token`)
-    groups.push(`等待首字 ${formatDuration(Date.now() - active.startTime)}`)
-  } else if (lastSettled !== null) {
-    // 状态三:空闲(上次已结算)
+  // 结算读数：准确速度 + 估算/实际偏差，等待首字与空闲态共用。
+  const settledGroups = (): string[] => {
+    const out: string[] = []
+    if (lastSettled === null) return out
     const durMs = lastSettled.endTime - lastSettled.startTime
     if (durMs > 0) {
       const tokens = lastSettled.actualTokens !== undefined ? lastSettled.actualTokens : lastSettled.estimatedTokens
       const mark = lastSettled.actualTokens !== undefined ? '' : '~'
-      groups.push(`准确速度 ${mark}${formatTps(tokens / (durMs / 1000))} tok/s`)
+      out.push(`准确速度 ${mark}${formatTps(tokens / (durMs / 1000))} tok/s`)
     }
     if (lastSettled.actualTokens !== undefined) {
-      groups.push(`估算 ${formatInt(lastSettled.estimatedTokens)} / 实际 ${formatInt(lastSettled.actualTokens)} (${formatGapPct(lastSettled.estimatedTokens, lastSettled.actualTokens)})`)
+      out.push(`估算 ${formatInt(lastSettled.estimatedTokens)} / 实际 ${formatInt(lastSettled.actualTokens)} (${formatGapPct(lastSettled.estimatedTokens, lastSettled.actualTokens)})`)
     } else {
-      groups.push(`估算 ~${formatInt(lastSettled.estimatedTokens)} token`)
+      out.push(`估算 ~${formatInt(lastSettled.estimatedTokens)} token`)
     }
+    return out
+  }
+
+  if (active !== null && active.firstTokenTime !== null) {
+    // 状态一：生成中，已出首字。停顿超窗无样本后速率格消失，只剩已停顿计时。
+    if (liveRate !== undefined) groups.push(`实时速度 ~${formatTps(liveRate)} tok/s`)
+    if (stallMs > 0) groups.push(`已停顿 ${formatDuration(stallMs)}`)
+    const out = active.exact && active.actualTokens !== undefined ? active.actualTokens : active.estimatedTokens
+    groups.push(`实时输出 ~${formatInt(out)} token`)
+    groups.push(`首字延迟 ${formatDuration(active.firstTokenTime - active.startTime)}`)
+  } else if (active !== null && active.firstTokenTime === null) {
+    // 状态二：等待首字，尚无 token，无实时速度与实时输出，展示与空闲态同款的结算读数。
+    groups.push(...settledGroups())
+    groups.push(`等待首字 ${formatDuration(Date.now() - active.startTime)}`)
+  } else if (lastSettled !== null) {
+    // 状态三:空闲(上次已结算)
+    groups.push(...settledGroups())
     if (lastSettled.firstTokenTime !== null) {
       groups.push(`首字延迟 ${formatDuration(lastSettled.firstTokenTime - lastSettled.startTime)}`)
     }

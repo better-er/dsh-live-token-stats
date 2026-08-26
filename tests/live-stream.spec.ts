@@ -1,11 +1,13 @@
 /**
  * Unit tests for the live rate tracker — the real-time host half that folds
  * raw `llm/stream` adapter chunks (text / reasoning / tool-call argument
- * fragments) into a per-session sliding-window tokens/sec figure.
+ * fragments) into a per-session windowed tokens/sec figure.
  *
  * Focuses on the contracts the session-event projection cannot cover: the
- * same-timestamp burst guard (a large tool-call argument delta arriving in one
- * frame must not explode the rate), window expiry, and idle reset.
+ * same-timestamp burst guard, window expiry, the TTFT-inclusive span that
+ * slides from step start up to the window size then stays fixed, stall
+ * accounting, and idle reset. All snapshots pass an explicit `asOf` so the
+ * simulated timelines never collide with the real clock.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -25,32 +27,36 @@ function toolCallDelta(argumentsDelta: string): StreamChunk {
   return { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write', argumentsDelta }
 }
 
+/** density 模式：33 个 ASCII ≈ 10 token。 */
+function tenTokenFrame(): StreamChunk {
+  return textDelta('a'.repeat(33))
+}
+
 const SESSION = 'session-1'
 
 describe('LiveTokenRateTracker', () => {
   it('starts idle: no snapshot before any delta', () => {
     const t = new LiveTokenRateTracker(SPEC)
-    const snap = t.snapshot(SESSION)
+    const snap = t.snapshot(SESSION, 10000)
     expect(snap.tokensPerSecond).toBeUndefined()
     expect(snap.updatedAt).toBe(0)
+    expect(snap.stallMs).toBe(0)
   })
 
   it('ignores non-delta chunks and empty deltas', () => {
     const t = new LiveTokenRateTracker(SPEC)
-    // A usage/block-start chunk carries no output tokens.
     t.fold(SESSION, { type: 'block-start', index: 0, blockType: 'text' }, 1000)
-    // A genuinely empty frame (no name, no id, empty argumentsDelta) counts nothing.
     t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId(''), argumentsDelta: '' }, 1000)
-    expect(t.snapshot(SESSION).tokensPerSecond).toBeUndefined()
+    expect(t.snapshot(SESSION, 10000).tokensPerSecond).toBeUndefined()
   })
 
   it('computes a sane rate for sparse text deltas', () => {
     const t = new LiveTokenRateTracker(SPEC)
-    // 100 tokens across 1 second → ~100 tok/s (Ascii-only text: 0.3 tok/char).
+    // 100 tokens across 1 second → ~100 tok/s.
     for (let i = 0; i < 10; i += 1) {
-      t.fold(SESSION, textDelta('a'.repeat(33)), 1000 + i * 100)
+      t.fold(SESSION, tenTokenFrame(), 1000 + i * 100)
     }
-    const snap = t.snapshot(SESSION)
+    const snap = t.snapshot(SESSION, 2000)
     expect(snap.tokensPerSecond).toBeGreaterThan(50)
     expect(snap.tokensPerSecond).toBeLessThan(200)
     expect(snap.updatedAt).toBeGreaterThan(0)
@@ -58,53 +64,118 @@ describe('LiveTokenRateTracker', () => {
 
   it('does NOT explode on a huge same-timestamp tool-call argument delta (burst guard)', () => {
     const t = new LiveTokenRateTracker(SPEC)
-    // The exact pathology from the session log: one 13.5k-char argument delta
-    // arrives in a single frame (single timestamp). Without the floor it would
-    // divide an ~8k-token burst by ~1ms → a million tok/s.
+    // 一条 13.5k 字符的参数 delta 单帧到达：13554 * 0.3 ≈ 4066 token，
+    // 50ms 下限兜底，速率有界，不会除零爆表。
     t.fold(SESSION, toolCallDelta('x'.repeat(13554)), 5000)
-    const snap = t.snapshot(SESSION)
-    const rate = snap.tokensPerSecond
-    expect(rate).toBeDefined()
-    // 13554 chars * 0.3 ≈ 4066 tokens; over the 50ms floor → ≤ ~81k tok/s.
-    // The point is it stays bounded (no /~0 explosion), not its exact value.
-    expect(rate!).toBeLessThan(100000)
+    const snap = t.snapshot(SESSION, 5000)
+    expect(snap.tokensPerSecond).toBeDefined()
+    expect(snap.tokensPerSecond!).toBeLessThan(100000)
   })
 
   it('expires samples outside the window', () => {
     const t = new LiveTokenRateTracker(SPEC)
-    // Old burst at ~1s: 10 * 99 ≈ 990 tokens. Far outside the 3s window once
-    // a new sample folds at 10s.
+    // 老 burst 在 ~1s，共 10*99 ≈ 990 token，远超 3s 窗口。
     for (let i = 0; i < 10; i += 1) t.fold(SESSION, textDelta('a'.repeat(330)), 1000 + i)
-    // New tiny sample (9.9 tokens) at 10000ms. If the old 990-token burst
-    // survived, rate ≈ 1000/0.05 = 20000; if it expired, rate ≈ 9.9/0.05 = 198.
-    t.fold(SESSION, textDelta('a'.repeat(33)), 10000)
-    const snap = t.snapshot(SESSION)
+    // 新样本 10 token 于 10000ms。若老 burst 存活，速率 ≈ 1000/0.05 = 20000。
+    t.fold(SESSION, tenTokenFrame(), 10000)
+    const snap = t.snapshot(SESSION, 10000)
     expect(snap.tokensPerSecond!).toBeGreaterThan(50)
     expect(snap.tokensPerSecond!).toBeLessThan(1000)
+  })
+
+  it('TTFT 随窗口滑动：分母 = min(流逝时间, 窗口)，等待首字期不外发速率', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    t.beginStep(SESSION, 1000)
+    // 等待首字期：尚无样本，数学上未定义，不发假 0。
+    expect(t.snapshot(SESSION, 1700).tokensPerSecond).toBeUndefined()
+    // 首字 2700ms 到达，TTFT 1.7s；10 帧共 100 token。
+    for (let i = 0; i < 10; i += 1) t.fold(SESSION, tenTokenFrame(), 2700 + i * 10)
+    const snap = t.snapshot(SESSION, 2790)
+    // span = min(2790-1000, 3000) = 1790ms → 100/1.79 ≈ 55.9 tok/s。
+    expect(snap.tokensPerSecond!).toBeGreaterThan(40)
+    expect(snap.tokensPerSecond!).toBeLessThan(70)
+  })
+
+  it('流逝超过窗口后，分母固定为窗口定值，不再增长', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    t.beginStep(SESSION, 1000)
+    // 4000..5200ms 每 100ms 一帧，共 13 帧 = 130 token。
+    for (let i = 0; i < 13; i += 1) t.fold(SESSION, tenTokenFrame(), 4000 + i * 100)
+    const snap = t.snapshot(SESSION, 6000)
+    // 分母 = min(5000, 3000) = 3000，窗口 3s 内全样本存活 → 130/3 ≈ 43.3 tok/s。
+    expect(snap.tokensPerSecond).toBeDefined()
+    expect(snap.tokensPerSecond!).toBeCloseTo(130 / 3, 1)
+    // 同一批样本，推进 1s 后分母仍封顶 3000，速率不变，验证定值语义。
+    const later = t.snapshot(SESSION, 7000)
+    expect(later.tokensPerSecond).toBeCloseTo(snap.tokensPerSecond!, 1)
+  })
+
+  it('停顿超窗无样本后，速率不外发，不进假 0', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    t.beginStep(SESSION, 1000)
+    t.fold(SESSION, tenTokenFrame(), 1500)
+    expect(t.snapshot(SESSION, 2000).tokensPerSecond).toBeDefined()
+    // 停顿远超 3s 窗口，样本全部滑出。
+    expect(t.snapshot(SESSION, 6000).tokensPerSecond).toBeUndefined()
+  })
+
+  it('累计停顿时长：长间隔计入，进行中实时增长，快照不结算', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    t.beginStep(SESSION, 1000)
+    t.fold(SESSION, tenTokenFrame(), 1200)
+    t.fold(SESSION, tenTokenFrame(), 3000) // gap 1800 ≥ 300 → stallMs = 1800
+    let snap = t.snapshot(SESSION, 3000)
+    expect(snap.stallMs).toBe(1800)
+    // 进行中 idle 900ms ≥ 300 → 显示 2700，但字段未结算。
+    snap = t.snapshot(SESSION, 3900)
+    expect(snap.stallMs).toBe(2700)
+    t.fold(SESSION, tenTokenFrame(), 5000) // gap 2000 → 字段 = 1800 + 2000 = 3800
+    snap = t.snapshot(SESSION, 5000)
+    expect(snap.stallMs).toBe(3800)
+  })
+
+  it('normal delta spacing does not count as stall', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    t.beginStep(SESSION, 1000)
+    t.fold(SESSION, tenTokenFrame(), 1200)
+    t.fold(SESSION, tenTokenFrame(), 1300) // gap 100 < 300，正常节奏
+    t.fold(SESSION, tenTokenFrame(), 1400)
+    expect(t.snapshot(SESSION, 1400).stallMs).toBe(0)
+  })
+
+  it('beginStep 重置停顿与样本，开启新 step 计时', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    t.beginStep(SESSION, 1000)
+    t.fold(SESSION, tenTokenFrame(), 1200)
+    const before = t.snapshot(SESSION, 1200)
+    expect(before.stallMs).toBe(0)
+    expect(before.tokensPerSecond).toBeDefined()
+    t.beginStep(SESSION, 20000)
+    const snap = t.snapshot(SESSION, 21000)
+    expect(snap.stallMs).toBe(0)
+    expect(snap.tokensPerSecond).toBeUndefined()
   })
 
   it('reset drops the session cell', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.fold(SESSION, textDelta('hello world'), 1000)
-    expect(t.snapshot(SESSION).tokensPerSecond).toBeDefined()
+    expect(t.snapshot(SESSION, 1000).tokensPerSecond).toBeDefined()
     t.reset(SESSION)
-    expect(t.snapshot(SESSION).tokensPerSecond).toBeUndefined()
+    expect(t.snapshot(SESSION, 1000).tokensPerSecond).toBeUndefined()
   })
 
   it('is per-session isolated', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.fold('s-a', textDelta('a'.repeat(330)), 1000)
-    expect(t.snapshot('s-b').tokensPerSecond).toBeUndefined()
-    expect(t.snapshot('s-a').tokensPerSecond).toBeDefined()
+    expect(t.snapshot('s-b', 1000).tokensPerSecond).toBeUndefined()
+    expect(t.snapshot('s-a', 1000).tokensPerSecond).toBeDefined()
   })
 
   it('folding a streamed arguments fragment count toward output like text', () => {
     const t = new LiveTokenRateTracker(SPEC)
-    // A genuinely streamed tool-call argument arrives in small fragments: they
-    // count (the user's directive: tool arguments are also streamed output).
     t.fold(SESSION, toolCallDelta('{"path": '), 1000)
     t.fold(SESSION, toolCallDelta('"C:\\\\tmp\\\\a.json", "content": "abc"'), 1100)
-    const snap = t.snapshot(SESSION)
+    const snap = t.snapshot(SESSION, 1200)
     expect(snap.tokensPerSecond).toBeDefined()
     expect(snap.tokensPerSecond!).toBeGreaterThan(0)
   })
@@ -113,23 +184,21 @@ describe('LiveTokenRateTracker', () => {
     const t = new LiveTokenRateTracker(BPE_SPEC)
     t.fold(SESSION, toolCallDelta('{"path": "C:/tmp/'), 1000)
     t.fold(SESSION, toolCallDelta('a.json", "content": "你好世界"}'), 1100)
-    const snap = t.snapshot(SESSION)
+    const snap = t.snapshot(SESSION, 1200)
     expect(snap.tokensPerSecond).toBeDefined()
     expect(snap.tokensPerSecond!).toBeGreaterThan(0)
   })
 
   it('BPE 模式：tool-call 首帧携带的 name 计入输出', () => {
     const t = new LiveTokenRateTracker(BPE_SPEC)
-    // 真实 DeepSeek 流的首帧形态：name + 空 arguments（官方统计工具名 token）。
     t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write_file', argumentsDelta: '' }, 1000)
-    const snap = t.snapshot(SESSION)
+    const snap = t.snapshot(SESSION, 1000)
     expect(snap.tokensPerSecond).toBeDefined()
     expect(snap.tokensPerSecond!).toBeGreaterThan(0)
   })
 
   it('BPE 模式：工具参数按解码后内容计数（转义原文不再直接 BPE）', () => {
     const t = new LiveTokenRateTracker(BPE_SPEC)
-    // 参数含 \n 转义：解码后是换行。累计总量应为 解码后token + name。
     const frames = [
       '{"content": "a\\',
       'nb"}',
@@ -137,9 +206,7 @@ describe('LiveTokenRateTracker', () => {
     for (let i = 0; i < frames.length; i += 1) {
       t.fold(SESSION, toolCallDelta(frames[i] as string), 1000 + i)
     }
-    // 窗口内总 token = 解码后参数 + write name（rate 窗口摊平 50ms 下限，直接比对过期前累计不可得；
-    // 用 3s 窗口 + 单帧高频采样近似不可靠——这里只验证非零且不爆表，精确口径由 projection 专项覆盖）
-    const snap = t.snapshot(SESSION)
+    const snap = t.snapshot(SESSION, 1100)
     expect(snap.tokensPerSecond).toBeDefined()
     expect(snap.tokensPerSecond!).toBeGreaterThan(0)
   })

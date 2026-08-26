@@ -69,6 +69,12 @@ function isTokenDelta(chunk: StreamChunk): boolean {
   return chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta'
 }
 
+/**
+ * 停顿判定阈值（毫秒）：相邻 delta 样本间隔达到该值才算「停顿/卡住」，
+ * 计入累计停顿（stallMs）。低于阈值的毫秒级批处理间隙视为正常推流节奏。
+ */
+const STALL_GRACE_MS = 300
+
 // --- 诊断日志（临时插桩：定位「估算 vs 官方 usage 偏差不为 0」；验证后移除） ---
 
 /**
@@ -130,28 +136,46 @@ interface StreamDebugStats {
 
 /** One sliding-window rate cell for a session. */
 interface RateCell {
-  /** Monotonic tick counter; bumped on every windowed recompute for decay. */
+  /** 窗口内的 token 样本，按到达时刻排序，超窗样本由 snapshot 滑出。 */
   samples: { time: number; tokens: number }[]
-  /** Latest computed token/sec, or undefined when the window is empty. */
-  rate: number | undefined
   /** Last wall-clock ms a delta was folded (used only for client decay hints). */
   updatedAt: number
-  /** 该会话的 BPE 增量切分状态（density 模式保持初始态）。 */
+  /** 本 step 起点，即拦截器记录到 llm/stream 事件的时刻，约等于请求发出时刻。 */
+  stepStartAt: number
+  /** 累计停顿毫秒，相邻 delta 间隔达 STALL_GRACE_MS 的段落之和。 */
+  stallMs: number
+  /** 最近一次有 token 样本的时刻，0 表示本 step 尚无样本，用于算进行中的停顿。 */
+  lastSampleAt: number
+  /** 该会话的 BPE 增量切分状态，density 模式保持初始态。 */
   inc: IncrementalState
-  /** tool-call 参数反转义的悬空尾部（跨帧；wall-clock 宿主态，不需重放）。 */
+  /** tool-call 参数反转义的悬空尾部，跨帧维护于 cell.esc。 */
   esc: UnescapeState
 }
 
 /** The live snapshot served to the client for one session. */
 export interface LiveTokenSnapshot {
-  /** Streaming tokens/sec over the sliding window (undefined when idle). */
+  /**
+   * 实时速度 tok/s：窗口内累计 token 除以跨度。
+   * 跨度 = min(自 step 开始流逝时间, 窗口定值)，即刚开始时含首字延迟随窗口滑动
+   * 爬升，首字延迟摊完且流逝超过窗口后固定为窗口定值；超窗无样本则无值。
+   */
   tokensPerSecond?: number
   /** Wall-clock epoch ms of the newest folded sample (client decays from here). */
   updatedAt: number
+  /** 累计停顿毫秒，含进行中的当前停顿，间隔达 STALL_GRACE_MS 才计。 */
+  stallMs: number
+  /** 距上一次 delta 样本的毫秒数，0 表示刚有数据，用于观察当前卡了多久。 */
+  sinceLastMs: number
 }
 
 const INITIAL_RATE_CELL = (): RateCell => ({
-  samples: [], rate: undefined, updatedAt: 0, inc: { ...EMPTY_INCREMENTAL }, esc: { ...EMPTY_UNESCAPE },
+  samples: [],
+  updatedAt: 0,
+  stepStartAt: 0,
+  stallMs: 0,
+  lastSampleAt: 0,
+  inc: { ...EMPTY_INCREMENTAL },
+  esc: { ...EMPTY_UNESCAPE },
 })
 
 /**
@@ -174,6 +198,10 @@ export class LiveTokenRateTracker {
     if (cell === undefined) {
       cell = INITIAL_RATE_CELL()
       this.cells.set(sessionId, cell)
+    }
+    // 停顿累计：相邻 delta 间隔达到阈值才算「卡住」，整个间隔计入累计停顿。
+    if (cell.lastSampleAt > 0 && timeMs - cell.lastSampleAt >= STALL_GRACE_MS) {
+      cell.stallMs += timeMs - cell.lastSampleAt
     }
     let tokensAdded = nameTokens
     // 工具参数先反转义再计数：官方按解码后的实际内容计费，delta 是 JSON 转义原文
@@ -199,41 +227,62 @@ export class LiveTokenRateTracker {
     cell.inc = inc
     cell.esc = esc
     cell.samples.push({ time: timeMs, tokens: tokensAdded })
-    this.recompute(cell, timeMs)
+    cell.lastSampleAt = timeMs
   }
 
-  /** Snapshot cell for one session. */
-  snapshot(sessionId: string): LiveTokenSnapshot {
+  /**
+   * 新 step 开始，每次 llm/stream 拦截到就调用。
+   * startAt 为拦截器收到事件的时刻，约等于请求发出时刻，TTFT 由此起算。
+   * 停顿与样本状态全部重置，避免跨 step 混算。
+   */
+  beginStep(sessionId: string, startAt: number): void {
+    let cell = this.cells.get(sessionId)
+    if (cell === undefined) {
+      cell = INITIAL_RATE_CELL()
+      this.cells.set(sessionId, cell)
+    }
+    cell.samples = []
+    cell.stepStartAt = startAt
+    cell.stallMs = 0
+    cell.lastSampleAt = 0
+    cell.inc = { ...EMPTY_INCREMENTAL }
+    cell.esc = { ...EMPTY_UNESCAPE }
+  }
+
+  /**
+   * Snapshot the cell's live rate AS OF `asOf`, defaults to `Date.now()`.
+   * 跨度恒 ≤ 窗口大小：开始阶段取 step 开始后的流逝时间，首字延迟随窗口滑动
+   * 爬升；流逝超过窗口后固定为窗口定值。停顿超窗后无样本，速率不发，数学上
+   * 未定义，客户端显示 0 兜底；stallMs 同步计入进行中的停顿。
+   */
+  snapshot(sessionId: string, asOf: number = Date.now()): LiveTokenSnapshot {
     const cell = this.cells.get(sessionId)
-    if (cell === undefined) return { updatedAt: 0 }
-    const out: LiveTokenSnapshot = { updatedAt: cell.updatedAt }
-    if (cell.rate !== undefined) out.tokensPerSecond = cell.rate
+    if (cell === undefined) return { updatedAt: 0, stallMs: 0, sinceLastMs: 0 }
+    const idleMs = cell.lastSampleAt > 0 ? Math.max(0, asOf - cell.lastSampleAt) : 0
+    const stallMs = cell.stallMs + (idleMs >= STALL_GRACE_MS ? idleMs : 0)
+    // 超窗样本逐批滑出窗口，长停顿后窗口内不再有样本。
+    const window = this.spec.rateWindowMs
+    const cutoff = asOf - window
+    let samples = cell.samples
+    while (samples.length > 0 && samples[0].time < cutoff) samples = samples.slice(1)
+    cell.samples = samples
+    cell.updatedAt = asOf
+    let rate: number | undefined
+    if (samples.length > 0) {
+      // 分母 = min(流逝时间, 窗口)，下限 50ms 防同批突发除零；未 beginStep 时回退旧口径。
+      const elapsedMs = cell.stepStartAt > 0 ? Math.max(0, asOf - cell.stepStartAt) : asOf - samples[0].time
+      const spanMs = Math.max(50, Math.min(elapsedMs, window))
+      const total = samples.reduce((acc, s) => acc + s.tokens, 0)
+      rate = total / (spanMs / 1000)
+    }
+    const out: LiveTokenSnapshot = { updatedAt: asOf, stallMs, sinceLastMs: idleMs }
+    if (rate !== undefined) out.tokensPerSecond = rate
     return out
   }
 
   /** Drop a session's cell (e.g. on turn/end or when no longer needed). */
   reset(sessionId: string): void {
     this.cells.delete(sessionId)
-  }
-
-  private recompute(cell: RateCell, asOf: number): void {
-    const window = this.spec.rateWindowMs
-    const cutoff = asOf - window
-    // Pop samples older than the sliding window.
-    let samples = cell.samples
-    while (samples.length > 0 && samples[0].time < cutoff) samples = samples.slice(1)
-    cell.samples = samples
-    cell.updatedAt = asOf
-    if (samples.length === 0) {
-      cell.rate = undefined
-      return
-    }
-    // Span from the window's oldest surviving sample to now, floored at 50ms
-    // so a burst of same-timestamp samples (a large tool-call argument delta
-    // arriving in one frame) cannot divide by ~0 and explode the rate.
-    const spanMs = Math.max(50, asOf - samples[0].time)
-    const total = samples.reduce((acc, s) => acc + s.tokens, 0)
-    cell.rate = total / (spanMs / 1000)
   }
 }
 
@@ -277,6 +326,8 @@ export function installHostLiveStream(
     'llm/stream',
     (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => {
       const sessionId = String(options.sessionId)
+      // 拦截到 llm/stream 的时刻约等于请求发出时刻，作为本 step 起点与 TTFT 起算点。
+      tracker.beginStep(sessionId, Date.now())
       return (async function* () {
         const seq = (streamSeq.get(sessionId) ?? 0) + 1
         streamSeq.set(sessionId, seq)
