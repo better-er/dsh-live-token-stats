@@ -2,22 +2,25 @@
  * Browser half of dsh-live-token-stats: the live stream readout in the
  * composer dock.
  *
- * Three states, all in Chinese labels per product convention:
+ * States, all in Chinese labels per product convention:
  *   - streaming, first token already out:
- *       实时速度 ~53.0 tok/s | 已停顿 2.5s | 实时输出 ~2,123 token | 首字延迟 1.2s
+ *       实时速度 ~53.0 tok/s | 平均速度 ~40.3 tok/s | 已停顿 2.5s | 实时输出 ~2,123 token | 首字延迟 1.2s
  *     the live rate is the host's windowed rate, TTFT folded into the span
  *     which slides from step start up to the window size, then stays fixed;
- *     long stalls expire the window's samples, the host stops emitting a rate
- *     and the speed readout disappears, leaving 已停顿 ticking.
+ *     平均速度 is the step-wide average from request start (TTFT and stalls
+ *     included), so the pair shows whether the stream is speeding up or
+ *     slowing down against its own average. Long stalls expire the window's
+ *     samples, the host stops emitting a rate and the live-rate readout
+ *     disappears, leaving 已停顿 ticking.
  *   - waiting for the first token:
- *       准确速度 28.7 tok/s | 估算 2,123 / 实际 1,966 (+8%) | 等待首字 3.2s
+ *       准确速度 28.7 tok/s | 估算 2,123 / 实际 1,966 (+8%) | 首字延迟 2.3s
  *     no token has arrived yet, so there is no live speed/output to show;
- *     the last settled readout is shown instead, with the wait timer ticking
- *     locally.
- *   - idle, last step settled:
- *       准确速度 189 tok/s | 估算 1,234 / 实际 1,100 (+12%) | 首字延迟 1.2s
- *     the settled actual rate, the estimate-vs-actual deviation, and the
- *     settled TTFT. No cumulative / global averages are shown any more.
+ *     the last settled readout is kept as the comparison baseline, and the
+ *     首字延迟 field ticks live at 10 Hz from the step's start until the
+ *     first token lands, where it freezes at the exact TTFT as the state
+ *     switches to streaming.
+ *   - idle, last step settled — identical settled readout, but 首字延迟 is
+ *     the previous step's settled TTFT, a static comparison baseline.
  *
  * @module dsh-live-token-stats/client
  */
@@ -144,26 +147,6 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
   const waiting = active !== null && active.firstTokenTime === null
   useWaitingTick(waiting ? active.startTime : null)
 
-  // —— 临时诊断：每次结算打一行「估算/实际/偏差」对照（devtools console），定位后移除 ——
-  useEffect(() => {
-    if (lastSettled === null) return
-    const { turn, step, estimatedTokens, actualTokens, startTime, endTime } = lastSettled
-    console.info(
-      '[dsh-live-token-stats] settled',
-      JSON.stringify({
-        turn,
-        step,
-        est: estimatedTokens,
-        actual: actualTokens ?? null,
-        gapPct:
-          typeof actualTokens === 'number' && actualTokens > 0
-            ? Math.round(((estimatedTokens - actualTokens) / actualTokens) * 100)
-            : null,
-        durMs: endTime - startTime,
-      }),
-    )
-  }, [lastSettled])
-
   const groups: string[] = []
 
   // 结算读数：准确速度 + 估算/实际偏差，等待首字与空闲态共用。
@@ -190,11 +173,17 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
     if (stallMs > 0) groups.push(`已停顿 ${formatDuration(stallMs)}`)
     const out = active.exact && active.actualTokens !== undefined ? active.actualTokens : active.estimatedTokens
     groups.push(`实时输出 ~${formatInt(out)} token`)
+    // 平均速度：本 step 自请求发出起的全程平均（分母含首字延迟与一切停顿），
+    // 与窗口化的实时速度并列对照，可看出推流在加速还是减速。
+    const elapsedMs = Date.now() - active.startTime
+    if (elapsedMs > 0) groups.push(`平均速度 ~${formatTps(out / (elapsedMs / 1000))} tok/s`)
     groups.push(`首字延迟 ${formatDuration(active.firstTokenTime - active.startTime)}`)
   } else if (active !== null && active.firstTokenTime === null) {
-    // 状态二：等待首字，尚无 token，无实时速度与实时输出，展示与空闲态同款的结算读数。
+    // 状态二：等待首字，尚无 token，无实时速度与实时输出。结算读数保持为对照
+    // 基线；首字延迟显示本次等待的实时耗时，由 useWaitingTick 以 10 Hz 驱动
+    // 重渲染逐帧上涨，首字落地的瞬间自然定格为该 step 的精确 TTFT。
     groups.push(...settledGroups())
-    groups.push(`等待首字 ${formatDuration(Date.now() - active.startTime)}`)
+    groups.push(`首字延迟 ${formatDuration(Date.now() - active.startTime)}`)
   } else if (lastSettled !== null) {
     // 状态三:空闲(上次已结算)
     groups.push(...settledGroups())
