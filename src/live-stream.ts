@@ -80,31 +80,23 @@ const STALL_GRACE_MS = 300
 /**
  * 诊断日志落盘位置：~/.dsh/dsh-live-token-stats-debug.jsonl。
  * 每行一个 JSON 记录（一次 llm/stream 流一行），字段见 {@link StreamDebugLog}。
- * 与宿主进程 console 双写，方便终端与文件两种查看方式。
+ * 仅落盘，不向控制台输出（避免每流一行刷屏）；写入失败仍上报控制台。
  */
 const DEBUG_LOG_PATH = join(homedir(), '.dsh', 'dsh-live-token-stats-debug.jsonl')
 
-/** 写一行诊断日志。日志 IO 绝不能影响主流程：任何失败都静默降级。 */
+/** 写一行诊断日志。日志 IO 绝不能影响主流程；异常必须留痕以便定位。 */
 function debugLog(record: Record<string, unknown>): void {
   let line: string
   try {
     line = JSON.stringify(record)
-  } catch {
+  } catch (err) {
+    console.error('[dsh-live-token-stats] 诊断日志序列化失败，已忽略:', err)
     return
   }
   try {
     appendFileSync(DEBUG_LOG_PATH, `${line}\n`)
   } catch (err) {
-    try {
-      console.error('[dsh-live-token-stats] 诊断日志写入失败，已忽略:', err)
-    } catch {
-      /* ignore */
-    }
-  }
-  try {
-    console.info(`[dsh-live-token-stats] ${line}`)
-  } catch {
-    /* ignore */
+    console.error('[dsh-live-token-stats] 诊断日志写入失败，已忽略:', err)
   }
 }
 
