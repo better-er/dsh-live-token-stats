@@ -141,18 +141,21 @@ describe('IncrementalTokenizer 增量一致性', () => {
     }
   })
 
-  it('超长 buffer 截断后与官方一次性计数精确一致', () => {
-    // 构造一个单一段超长的中文串以覆盖 truncateTail 路径，验证不抛错且计数接近
-    const long = '中'.repeat(20_000) + '尾' + '文'.repeat(5)
-    // 官方标准 V4-Flash tokenizer 对同文本一次性计数 20006（已核实），本地无上限一次性切分应逐字对齐
-    expect(tokenCount(long)).toBe(20_006)
+  it('真实长句重复 100 次：增量、一次性、官方三者精确一致（覆盖截断路径）', () => {
+    // 真实混合中英长句（含空格/标点，pre-token 拆成多段，有真实词级合并），重复 100 次
+    // 总长 10700 字符远超 MAX_TAIL_CHARS，覆盖 truncateTail 截断路径
+    const sentence =
+      '深度学习的 Tokenizer 需要高效处理中英文混排，比如把 Hello, 你好 这样的文本正确切分，' +
+      '同时保持字节级 BPE 的无损对齐。代码片段也应被精确计数：let x = 42; return x + 1;'
+    const long = sentence.repeat(100)
+    // 官方 V4-Flash tokenizer 对同文一次性计数 5600（已核实），本地无上限一次性切分逐字对齐
+    expect(tokenCount(long)).toBe(5_600)
     let state = EMPTY_INCREMENTAL
     for (let i = 0; i < long.length; i += 7) {
       state = incrementalFeed(state, long.slice(i, i + 7)).state
     }
-    // v0.3 放开段长后增量与一次性精确相等：超长段是单一整段，truncateTail 会整段保留不切开，
-    // 无跨边界合并损失，因此总计数必须与官方精确一致，而非容差
-    expect(incrementalTotal(state)).toBe(20_006)
+    // 增量截断只整段结算不切开，无跨边界合并损失，故精确等于官方与一次性，而非容差
+    expect(incrementalTotal(state)).toBe(5_600)
   })
 
   it('空帧不变', () => {
