@@ -11,6 +11,7 @@ DeepSeek Harness 经常会看起来像卡住了，只显示**深度潜水中**�
 ## 功能
 
 - **估算算法**：默认 `bpe` 模式将流式文本的每个 delta 增量喂入字节级 BPE 切分器，本地内置 DeepSeek V4 词表；跨 delta 维护未完成尾段，计数与整段一次性切分逐 token 一致，并已用 transformers 逐 token id 黄金对照验证。可选 `density` 双密度回退，按字符类别分别折算，配置见下方。
+- **added tokens 对齐**：内置完整 added tokens 元数据，与官方 tokenizer.json 逐项一致，编码时按最长前缀匹配；仅特殊 token 直接输出其 id，其余命中与 BPE 处理等价，与 transformers 逐 id 对齐，已实测对照。
 - **偏差对账与系统误差**：输出 token 估算与官方 usage 双字段并列，结算后由 usage 校准，偏差如实显示。工具调用因官方额外计费消息模板与调用 id，本地估算会低于实际值——实测单工具约 +40~60 token、双工具约 +70~80 token；纯文本与推理输出偏差约 1~2 token。
 
 ## 它长什么样
@@ -87,6 +88,13 @@ dsh plugin --profile web remove dsh-live-token-stats
 - 同时声明了 `dsh.bundle`，因此也是一个**自挂载的 bundle 层插件**：用 `dsh plugin --profile <name> add` 安装后，会被自动识别为 profile layer 并挂载，无需手工写组合 entry。
 - 纯插件自包含，不改 DSH 源码。
 - 构建：`pnpm install` 后依次执行 `pnpm typecheck`、`pnpm test`、`pnpm build`；源码在 `src/`，发布产物在 `lib/`，由 tsdown 构建，运行时加载的是 lib。
+
+## 开发、CI 与发布
+
+- 仓库托管于 GitHub，主分支 `master`。所有改动经 **PR** 合入 `master`，`master` 建议开启分支保护，拒绝直接 push 与 force push。
+- **CI**：`.github/workflows/ci.yml` 在 `master` 的 push 与所有 PR 上自动执行 `typecheck → test → build`，全绿是合并门槛。
+- **CD**：`.github/workflows/release.yml` 在推送 `vX.Y.Z` tag 如 `v0.3.0` 时自动发布——凭 tag 号更新 `package.json` 版本并回写 master、构建、发布到 npm、并生成 GitHub Release 草稿人工确认。npm 发布走 Trusted Publishing，需先在 npm 侧把此仓库的 Actions 绑定到对应包，无需 `NPM_TOKEN` secret。
+- 具体分支、提交、PR 约定见 [CONTRIBUTING.md](./CONTRIBUTING.md)。
 
 ## License
 

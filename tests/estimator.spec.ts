@@ -60,9 +60,7 @@ describe('resolveSpec', () => {
   })
 
   it('ignores unknown keys', () => {
-    // Runtime config arrives with extra keys (e.g. the loader-injected
-    // `enabled` master switch); ignoring them is deliberate — aborting the
-    // whole plugin tree over one foreign key is worse than dropping it.
+    // 运行时配置会带额外 key，例如 loader 注入的 `enabled` 总开关，故意忽略它们，为单个外来 key 终止整个插件树比丢弃它更糟。
     const spec = resolveSpec({ nope: 1 } as unknown as EstimatorConfig)
     expect(spec.asciiTokenPerChar).toBe(ESTIMATOR_DEFAULTS.asciiTokenPerChar)
     expect(spec.cjkTokenPerChar).toBe(ESTIMATOR_DEFAULTS.cjkTokenPerChar)

@@ -10,11 +10,11 @@ import {
 import { tokenCount } from '../src/tokenizer/bpe.ts'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 
-// 旧行为测试显式用 density 模式（数值断言不变）；bpe 模式在下方专项用例验证。
+// 旧行为测试显式用 density 模式，数值断言不变，bpe 模式在下方专项用例验证。
 const SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'density' }
 const BPE_SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'bpe' }
 
-/** Build a minimal session event. seq is not used by the folds under test. */
+/** 构建一个最小会话事件。被测的折叠不关心 seq。 */
 function event(seq: number, type: string, data: unknown, time = 1000 + seq * 10): SessionEvent {
   return { type, data, time, seq } as unknown as SessionEvent
 }
@@ -51,7 +51,7 @@ describe('activeStepApply', () => {
     s = activeStepApply(s, textDelta(1, 'hello', 1010), SPEC)
     s = activeStepApply(s, textDelta(2, ' world', 1020), SPEC)
     expect(s.active!.firstTokenTime).toBe(1010)
-    // hello(5 ascii)=2, " world"(6 ascii)=2 -> 4
+    // hello(5 个 ascii)=2，" world"(6 个 ascii)=2 -> 4
     expect(s.active!.estimatedTokens).toBe(4)
     expect(s.active!.exact).toBe(false)
   })
@@ -106,7 +106,7 @@ describe('throughputApply', () => {
     let t: ThroughputState = THROUGHPUT_INIT
     t = throughputApply(t, textDelta(1, 'aaaa', 1000), SPEC)
     t = throughputApply(t, textDelta(2, 'aaaa', 2000), SPEC)
-    // 4 ascii *0.3 = 1.2 -> 1 tok each; 2 tokens over (2000-1000)=1s -> 2 tok/s
+    // 4 个 ascii ×0.3 = 1.2 -> 每段 1 token；2 token 除以 (2000-1000)=1s -> 2 tok/s
     expect(t.currentRate).toBeCloseTo(2, 5)
   })
 
@@ -183,15 +183,15 @@ describe('BPE 模式：tool-call 参数反转义（官方按解码后内容计�
     // 参数原文含 JSON 转义：\n 是 2 字符，解码后是 1 换行符
     s = activeStepApply(s, toolCallDelta(1, '{"content": "a\\nb"}'), BPE_SPEC)
     const decoded = '{"content": "a\nb"}'
-    // 不再等于原文 tokenCount（旧行为），而等于解码后 tokenCount + name
+    // 不再等于原文 tokenCount 即旧行为，而等于解码后 tokenCount 加 name
     expect(s.active!.estimatedTokens).toBe(tokenCount(decoded) + tokenCount('write'))
   })
 
   it('跨帧：悬空尾部跨帧合并后与整段解码一致', () => {
     const whole = '{"content": "第\\n二\\t行\\u4f60"}'
     let s = activeStepApply(ACTIVE_INIT, stepStart(0, 0, 0, 1000), BPE_SPEC)
-    // 逐字符切帧喂入（极端流式：转义序列被拆得最碎）。
-    // 真实流语义：name 只在首个 tool-call 片段携带（translate.ts），后续帧不带。
+    // 逐字符切帧喂入，即极端流式，转义序列被拆得最碎。
+    // 真实流语义：name 只在首个 tool-call 片段携带，见 translate.ts，后续帧不带。
     for (let i = 0; i < whole.length; i += 1) {
       const name = i === 0 ? 'write' : undefined
       s = activeStepApply(s, event(1, 'assistant/chunk', {
@@ -205,7 +205,7 @@ describe('BPE 模式：tool-call 参数反转义（官方按解码后内容计�
   it('纯文本 delta 不受反转义影响（text-delta 不是 JSON 转义原文）', () => {
     let s = activeStepApply(ACTIVE_INIT, stepStart(0, 0, 0, 1000), BPE_SPEC)
     s = activeStepApply(s, textDelta(1, 'a\\nb', 1010), BPE_SPEC)
-    // text-delta 的内容就是原样文本，反斜杠-n 保持 2 字符（与旧行为一致）
+    // text-delta 的内容就是原样文本，反斜杠加 n 保持 2 字符，与旧行为一致
     expect(s.active!.estimatedTokens).toBe(tokenCount('a\\nb'))
   })
 

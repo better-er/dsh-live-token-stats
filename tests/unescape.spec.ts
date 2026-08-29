@@ -3,7 +3,7 @@
  *
  * 验证三件事：
  * 1. 常见转义（\n \r \t \" \\ \uXXXX）正确还原；
- * 2. 跨帧拆分（悬空尾部）与整段解码结果一致（逐字符一致）；
+ * 2. 跨帧拆分即悬空尾部与整段解码结果逐字符一致；
  * 3. 非法转义按原样保留、空帧与尾帧收敛。
  *
  * @module dsh-live-token-stats/tests/unescape
@@ -58,7 +58,7 @@ describe('unescapeFeed', () => {
   it('跨帧拆分与整段解码逐字符一致（含反斜杠歧义）', () => {
     const whole = '{"path": "C:\\\\tmp\\\\a.json", "content": "第\\n二\\t行\\u4f60"}'
     const reference = unescapeAll(whole)
-    // 逐帧逐个字符拆开喂（模拟流式细碎 fragment）
+    // 逐帧逐个字符拆开喂，模拟流式细碎 fragment
     let state = EMPTY_UNESCAPE
     let out = ''
     for (const ch of whole) {
