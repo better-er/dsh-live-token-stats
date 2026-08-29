@@ -56,25 +56,14 @@ export interface PreToken {
 
 /**
  * pre_tokenizer：依次应用三条 split 加 ByteLevel，返回段列表。
- * 超长段极罕见，即连续数千字中文，会在字符边界截断到 ≤ MAX_SEG_CODES 码位，朴素 BPE 对每段为常数开销。
- * 截断处最多损失一个跨边界合并，误差有界，文档已声明此取舍，样例文本不触发。
+ * 段长不限——v0.3 起 bpeMerge 用 O(n log n) 堆实现，可安全处理任意长度段，
+ * 不再需要 MAX_SEG_CODES 截断（截断反而会损失跨边界合并、引入误差）。
  */
 export function preTokenize(text: string): PreToken[] {
   const segs = splitKeep(text, RE_DIGITS)
     .flatMap((s) => splitKeep(s, RE_CJK))
     .flatMap((s) => splitKeep(s, RE_WORDS))
-  const out: PreToken[] = []
-  for (const s of segs) {
-    if (s.length <= MAX_SEG_CODES) {
-      out.push({ text: s, codes: bytesToChars(charToBytes(s)) })
-    } else {
-      for (let off = 0; off < s.length; off += MAX_SEG_CODES) {
-        const part = s.slice(off, off + MAX_SEG_CODES)
-        out.push({ text: part, codes: bytesToChars(charToBytes(part)) })
-      }
-    }
-  }
-  return out
+  return segs.map((s) => ({ text: s, codes: bytesToChars(charToBytes(s)) }))
 }
 
 // --- added tokens：trie 最长前缀匹配（按码点），命中且 special=true 直接出 id ---
@@ -246,40 +235,108 @@ function getVocabMap(): Map<string, number> {
 }
 
 /**
- * 单段最大码元数。
- * 超长段极罕见，在 preTokenize 时按码位截断，朴素 BPE 每段 O(MAX²) 约为常数开销。
- * 截断处最多损失一个跨边界合并，误差有界，文档已声明该取舍。
- */
-const MAX_SEG_CODES = 512
-
-/**
  * 对一段码位数组做 BPE 合并，返回 token id 列表。
  *
- * 朴素实现：每轮在所有相邻 pair 里取 rank 最小者合并，与 transformers 和 tokenizers 的语义逐 id 一致。
- * 段长 ≤ MAX_SEG_CODES，每段常数开销。
+ * O(n log n) 堆实现（v0.3）：最小堆（按 rank）+ 邻接双链表 + 惰性删除。
+ * 与朴素全扫版语义逐 id 一致：merges rank 全局唯一（=数组下标），每轮最小 pair 唯一，
+ * 堆顶即朴素版全扫选中的同一个 pair，因此两个版本合并轨迹完全相同，可直接对拍。
+ *
+ * 正确性要点：
+ *  - 惰性删除：合并后旧候选不主动删，弹出时校验（left 仍 live、right 存在且 live、
+ *    实时 rank 与入堆时一致），不通过则丢弃重弹，避免 O(n) 的删除维护。
+ *  - 每节点至多合并一次，每个 pair 进出堆 O(log n)，总 O(n log n)。
+ *  - rank 平局时用显式次键 (rank, leftIdx) 保证确定性：与朴素版「取首个最小 index」一致。
  */
 export function bpeMerge(codes: number[]): number[] {
   const rank = getRankMap()
   const vocab = getVocabMap()
-  const sym = codes.map((cp) => String.fromCodePoint(cp))
-  while (sym.length > 1) {
-    let bestRank = Number.POSITIVE_INFINITY
-    let bestI = -1
-    for (let i = 0; i < sym.length - 1; i += 1) {
-      const r = rank.get(`${sym[i]},${sym[i + 1]}`)
-      if (r !== undefined && r < bestRank) {
-        bestRank = r
-        bestI = i
+  const n = codes.length
+  if (n === 0) return []
+  // 节点：str=当前符号、prev/next=链表邻居下标(-1 为端)、dead=已被并入别的符号
+  const nodes: Array<{ str: string; prev: number; next: number; dead: boolean }> = []
+  for (let i = 0; i < n; i += 1) {
+    nodes.push({
+      str: String.fromCodePoint(codes[i]),
+      prev: i > 0 ? i - 1 : -1,
+      next: i + 1 < n ? i + 1 : -1,
+      dead: false,
+    })
+  }
+  // pair 元素 {rank,left}；rank 为 (left 与其右邻) 的合并 rank，+∞ 表示无此合并
+  const pairRank = (l: number): number => {
+    const r = nodes[l].next
+    if (r === -1) return Number.POSITIVE_INFINITY
+    return rank.get(`${nodes[l].str},${nodes[r].str}`) ?? Number.POSITIVE_INFINITY
+  }
+  const heap: Array<{ rank: number; left: number }> = []
+  const cmp = (a: { rank: number; left: number }, b: { rank: number; left: number }): number =>
+    a.rank !== b.rank ? a.rank - b.rank : a.left - b.left
+  const push = (r: number, l: number): void => {
+    heap.push({ rank: r, left: l })
+    let c = heap.length - 1
+    while (c > 0) {
+      const p = (c - 1) >> 1
+      if (cmp(heap[p], heap[c]) <= 0) break
+      ;[heap[p], heap[c]] = [heap[c], heap[p]]
+      c = p
+    }
+  }
+  const pop = (): { rank: number; left: number } | undefined => {
+    if (heap.length === 0) return undefined
+    const top = heap[0]
+    const last = heap.pop()!
+    if (heap.length > 0) {
+      heap[0] = last
+      let i = 0
+      for (;;) {
+        const l = i * 2 + 1
+        const r = l + 1
+        let m = i
+        if (l < heap.length && cmp(heap[l], heap[m]) < 0) m = l
+        if (r < heap.length && cmp(heap[r], heap[m]) < 0) m = r
+        if (m === i) break
+        ;[heap[i], heap[m]] = [heap[m], heap[i]]
+        i = m
       }
     }
-    if (bestI === -1) break
-    sym.splice(bestI, 2, sym[bestI] + sym[bestI + 1])
+    return top
   }
-  const ids = new Array<number>(sym.length)
-  for (let i = 0; i < sym.length; i += 1) {
-    const id = vocab.get(sym[i])
+  for (let i = 0; i < n - 1; i += 1) {
+    const r = pairRank(i)
+    if (Number.isFinite(r)) push(r, i)
+  }
+  // 主循环：弹堆顶，惰性校验后合并 left+right 为新节点，接拢邻居并只入堆新形成的两个 pair
+  while (heap.length > 0) {
+    const e = pop()!
+    const l = e.left
+    const r = nodes[l].next
+    if (r === -1 || nodes[l].dead || nodes[r].dead) continue // 候选已失效，丢弃重弹
+    if (pairRank(l) !== e.rank) continue // 实时 rank 变更（邻域被重排），丢弃
+    const prev = nodes[l].prev
+    const next = nodes[r].next
+    const newIdx = nodes.length
+    nodes.push({ str: nodes[l].str + nodes[r].str, prev, next, dead: false })
+    nodes[l].dead = true
+    nodes[r].dead = true
+    if (prev !== -1) {
+      nodes[prev].next = newIdx
+      const pr = pairRank(prev)
+      if (Number.isFinite(pr)) push(pr, prev)
+    }
+    if (next !== -1) {
+      nodes[next].prev = newIdx
+      const nr = pairRank(newIdx)
+      if (Number.isFinite(nr)) push(nr, newIdx)
+    }
+  }
+  // 结果 = 沿链表遍历活节点查 vocab id（链头是唯一 prev===-1 的活节点）
+  const ids: number[] = []
+  let head = nodes.findIndex((nd) => !nd.dead && nd.prev === -1)
+  while (head !== -1) {
+    const id = vocab.get(nodes[head].str)
     if (id === undefined) throw new Error(`tokenizer: 符号 不在 vocab 中`)
-    ids[i] = id
+    ids.push(id)
+    head = nodes[head].next
   }
   return ids
 }

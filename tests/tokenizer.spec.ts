@@ -49,10 +49,10 @@ describe('preTokenize 分段', () => {
 })
 
 describe('bpeMerge', () => {
-  it('hello 合并后 token 数少于字符数', () => {
+  it('hello 合并为单 token，id 与官方 transformers 一致', () => {
     const ids = bpeMerge(preTokenize('hello')[0].codes)
-    expect(ids.length).toBeLessThan(5)
-    expect(ids.every((n) => Number.isInteger(n) && n >= 0)).toBe(true)
+    // 官方标准 V4-Flash tokenizer 对 'hello'(add_special_tokens=false) 输出单 token [33310]
+    expect(ids).toEqual([33310])
   })
 
   it('中文多字 token 存在（习近平新时代中国特色社会主义思想 一词）', () => {
@@ -141,18 +141,18 @@ describe('IncrementalTokenizer 增量一致性', () => {
     }
   })
 
-  it('超长 buffer 截断后仍与一次性切分一致（有界误差容忍内）', () => {
+  it('超长 buffer 截断后与官方一次性计数精确一致', () => {
     // 构造一个单一段超长的中文串以覆盖 truncateTail 路径，验证不抛错且计数接近
     const long = '中'.repeat(20_000) + '尾' + '文'.repeat(5)
+    // 官方标准 V4-Flash tokenizer 对同文本一次性计数 20006（已核实），本地无上限一次性切分应逐字对齐
+    expect(tokenCount(long)).toBe(20_006)
     let state = EMPTY_INCREMENTAL
     for (let i = 0; i < long.length; i += 7) {
       state = incrementalFeed(state, long.slice(i, i + 7)).state
     }
-    const total = incrementalTotal(state)
-    expect(total).toBeGreaterThan(0)
-    // 截断处最多损失一个段内合并的计数，误差 ≤ 1 段 token 数，此处为 +1 补偿会偏大，断言总数不超过一次性计数加 5
-    const oneShot = tokenCount(long)
-    expect(Math.abs(total - oneShot)).toBeLessThanOrEqual(5)
+    // v0.3 放开段长后增量与一次性精确相等：超长段是单一整段，truncateTail 会整段保留不切开，
+    // 无跨边界合并损失，因此总计数必须与官方精确一致，而非容差
+    expect(incrementalTotal(state)).toBe(20_006)
   })
 
   it('空帧不变', () => {
