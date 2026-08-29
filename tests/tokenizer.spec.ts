@@ -1,9 +1,8 @@
 /**
- * tokenizer 模块单测：黄金对照（transformers 逐 token id，含 added tokens 特殊
- * 匹配用例）+ 增量一致性 + 模块行为。
+ * tokenizer 模块单测：黄金对照、增量一致性、模块行为。
+ * 黄金对照即与 transformers 逐 token id 比对，含 added tokens 特殊匹配用例。
  *
- * 黄金数据由 deepseek_v3_tokenizer/scripts/export_fixtures.py 生成
- * （基于 DeepSeek V4-Flash tokenizer，词表与 V3 逐字节相同）。
+ * 黄金数据由 deepseek_v3_tokenizer/scripts/export_fixtures.py 生成，基于 DeepSeek V4-Flash tokenizer，其词表与 V3 逐字节相同。
  */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
@@ -25,7 +24,7 @@ describe('字节映射', () => {
 describe('preTokenize 分段', () => {
   it('数字 1-3 位独立成段（R1）', () => {
     const segs = preTokenize('12345 abc 6789')
-    // 注意 R3 分支2 的可选前缀会吃掉单个空格 + 字母（' abc' 一段，与 Rust 一致）
+    // 注意 R3 分支2 的可选前缀会吃掉单个空格加字母，' abc' 成一段，与 Rust 一致
     expect(segs.map((s) => s.text)).toEqual(['123', '45', ' abc', ' ', '678', '9'])
   })
 
@@ -44,7 +43,7 @@ describe('preTokenize 分段', () => {
 
   it('换行与制表符独立成段（R3 分支 4/5/6）', () => {
     const segs = preTokenize('a\r\nb\nc\td')
-    // 注意制表符被 R3 分支2 的可选前缀吃进 'd' 段（与 Rust 一致）
+    // 注意制表符被 R3 分支2 的可选前缀吃进 'd' 段，与 Rust 一致
     expect(segs.map((s) => s.text)).toEqual(['a', '\r\n', 'b', '\n', 'c', '\td'])
   })
 })
@@ -63,7 +62,7 @@ describe('bpeMerge', () => {
 })
 
 describe('splitWithAdded 分段', () => {
-  const PH0 = '\u003c\uff5cplace\u2581holder\u2581no\u25810\uff5c\u003e' // 全角占位符（与 data 内容一致）
+  const PH0 = '\u003c\uff5cplace\u2581holder\u2581no\u25810\uff5c\u003e' // 全角占位符，与 data 内容一致
 
   it('special 全角占位符成为独立段', () => {
     const segs = splitWithAdded(`${PH0}测试`)
@@ -131,7 +130,7 @@ describe('IncrementalTokenizer 增量一致性', () => {
       let state = EMPTY_INCREMENTAL
       let i = 0
       while (i < c.text.length) {
-        const frameLen = (i % 3) + 1 // 1..3 字符一帧（跨词边界）
+        const frameLen = (i % 3) + 1 // 1..3 字符一帧，可跨词边界
         const frame = c.text.slice(i, i + frameLen)
         const r = incrementalFeed(state, frame)
         state = r.state
@@ -143,7 +142,7 @@ describe('IncrementalTokenizer 增量一致性', () => {
   })
 
   it('超长 buffer 截断后仍与一次性切分一致（有界误差容忍内）', () => {
-    // 构造一个单一段超长的中文串（覆盖 truncateTail 路径），验证不抛错且计数接近
+    // 构造一个单一段超长的中文串以覆盖 truncateTail 路径，验证不抛错且计数接近
     const long = '中'.repeat(20_000) + '尾' + '文'.repeat(5)
     let state = EMPTY_INCREMENTAL
     for (let i = 0; i < long.length; i += 7) {
@@ -151,8 +150,7 @@ describe('IncrementalTokenizer 增量一致性', () => {
     }
     const total = incrementalTotal(state)
     expect(total).toBeGreaterThan(0)
-    // 截断处最多损失一个段内合并的计数，误差 ≤ 1 段 token 数（此处为 +1 补偿会偏大，
-    // 断言总数不超过一次性计数 + 5）
+    // 截断处最多损失一个段内合并的计数，误差 ≤ 1 段 token 数，此处为 +1 补偿会偏大，断言总数不超过一次性计数加 5
     const oneShot = tokenCount(long)
     expect(Math.abs(total - oneShot)).toBeLessThanOrEqual(5)
   })

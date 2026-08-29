@@ -1,16 +1,12 @@
 /**
- * DeepSeek-V3/V4 字节级 BPE 的纯函数实现（与 HF transformers 的
- * `encode(add_special_tokens=false)` 逐 token id 对齐）。
+ * DeepSeek-V3/V4 字节级 BPE 的纯函数实现，与 HF transformers 的 `encode(add_special_tokens=false)` 逐 token id 对齐。
  *
- * 流程：added tokens 的最长前缀匹配（trie；命中且 special=true 时直接输出
- * 该 token id，其余命中视为普通文本）→ pre_tokenizer（三条 Isolated Split +
- * ByteLevel）→ 每段内按 merges rank 迭代合并 → 返回 token id 序列。
- * 数据来自 src/tokenizer/data.ts（由 scripts/export-tokenizer-data.mjs 从
- * HF tokenizer.json 生成）。
+ * 流程：先做 added tokens 的最长前缀匹配，trie 命中且 special=true 时直接输出该 token id，其余命中视为普通文本。
+ * 然后走 pre_tokenizer，即三条 Isolated Split 加 ByteLevel，再在每段内按 merges rank 迭代合并，最后返回 token id 序列。
+ * 数据来自 src/tokenizer/data.ts，由 scripts/export-tokenizer-data.mjs 从 HF tokenizer.json 生成。
  *
- * 注：与 transformers 的差异仅在 non-special added token——它们命中后依然按
- * 普通文本走完整 BPE（tokenizers 的 split 默认 true 即递归 tokenize 该区间），
- * 不产生独占 token id（已实测：` response` 输出 BPE 的 4256 而非 128822）。
+ * 注：与 transformers 的差异仅在 non-special added token，它们命中后依然按普通文本走完整 BPE，tokenizers 的 split 默认 true 即递归 tokenize 该区间，不产生独占 token id。
+ * 已实测 ` response` 输出 BPE 的 4256 而非 128822。
  *
  * @module dsh-live-token-stats/tokenizer/bpe
  */
@@ -33,8 +29,8 @@ const RE_WORDS = new RegExp(
 )
 
 /**
- * 按正则保持匹配内容切分（HF Split behavior=Isolated：每个匹配独立成段，
- * 间隙也保留为独立段；不合并相邻段）。
+ * 按正则保持匹配内容切分，HF Split behavior=Isolated 语义。
+ * 每个匹配独立成段，间隙也保留为独立段，不合并相邻段。
  */
 function splitKeep(text: string, re: RegExp): string[] {
   const out: string[] = []
@@ -54,15 +50,14 @@ function splitKeep(text: string, re: RegExp): string[] {
 export interface PreToken {
   /** 段在原文中的字符序列。 */
   text: string
-  /** 字节映射后的码位数组（BPE 合并的输入）。 */
+  /** 字节映射后的码位数组，作为 BPE 合并的输入。 */
   codes: number[]
 }
 
 /**
- * pre_tokenizer：依次应用三条 split + ByteLevel，返回段列表。
- * 超长段（罕见：连续数千字中文）在字符边界截断到 ≤ MAX_SEG_CODES 码位，
- * 朴素 BPE 对每段为常数开销；截断处最多损失一个跨边界合并，误差有界
- * （文档已声明此取舍），样例文本不触发。
+ * pre_tokenizer：依次应用三条 split 加 ByteLevel，返回段列表。
+ * 超长段极罕见，即连续数千字中文，会在字符边界截断到 ≤ MAX_SEG_CODES 码位，朴素 BPE 对每段为常数开销。
+ * 截断处最多损失一个跨边界合并，误差有界，文档已声明此取舍，样例文本不触发。
  */
 export function preTokenize(text: string): PreToken[] {
   const segs = splitKeep(text, RE_DIGITS)
@@ -112,7 +107,7 @@ function getAddedTrie(): AddedNode {
   return root
 }
 
-/** 所有 added token 的首码点集合（潜在窗口起点判定用）。 */
+/** 所有 added token 的首码点集合，用于潜在窗口起点判定。 */
 const addedFirstChars: Set<string> = (() => {
   const s = new Set<string>()
   for (const t of ADDED_TOKENS) {
@@ -175,15 +170,15 @@ function matchAddedAt(
   return best
 }
 
-/** 分段结果：bpe 段（普通文本，需按 merges 合并）或 added 段（special token 单 id）。 */
+/** 分段结果：bpe 段即普通文本须按 merges 合并，或 added 段即 special token 单 id。 */
 export type TokenSegment =
   | { kind: 'bpe'; text: string; codes: number[] }
   | { kind: 'added'; text: string; id: number }
 
 /**
- * 先做 added token 最长前缀匹配再分段：命中且 special=true 的 token 作为独立
- * added 段（直接输出其 id）；其余文本正常走 pre-tokenize 成 bpe 段。
- * non-special 命中与普通文本等价（transformers 对它递归 tokenize，已实测逐 id 一致）。
+ * 先做 added token 最长前缀匹配再分段。
+ * 命中且 special=true 的 token 作为独立 added 段并直接输出其 id，其余文本正常走 pre-tokenize 成 bpe 段。
+ * non-special 命中与普通文本等价，transformers 对它递归 tokenize，已实测逐 id 一致。
  * 返回的段序列按原文顺序交替，空输入返回空数组。
  */
 export function splitWithAdded(text: string): TokenSegment[] {
@@ -213,7 +208,7 @@ export function splitWithAdded(text: string): TokenSegment[] {
   return out
 }
 
-// --- merges rank 表 + vocab 映射（解码一次，缓存） ---
+// --- merges rank 表与 vocab 映射，解码一次并缓存 ---
 let rankMap: Map<string, number> | undefined
 let vocabMap: Map<string, number> | undefined
 
@@ -227,8 +222,10 @@ function getRankMap(): Map<string, number> {
   return map
 }
 
-/** vocab 的 字符串→id 映射（字节字符键 + 合并产物键都在其中）。
- * 合并产物 id = 256 + rank，不是 VOCAB_SIZE + rank。 */
+/**
+ * vocab 的字符串→id 映射，字节字符键与合并产物键都在其中。
+ * 合并产物 id = 256 + rank，不是 VOCAB_SIZE + rank。
+ */
 function getVocabMap(): Map<string, number> {
   if (vocabMap !== undefined) return vocabMap
   const bytes = Buffer.from(VOCAB_B64, 'base64')
@@ -248,15 +245,18 @@ function getVocabMap(): Map<string, number> {
   return map
 }
 
-/** 单段最大码元数：超长段（罕见）在 preTokenize 时按码位截断，朴素 BPE 每段
- * O(MAX²) 约为常数开销；截断处最多损失一个跨边界合并，误差有界（文档已声明）。 */
+/**
+ * 单段最大码元数。
+ * 超长段极罕见，在 preTokenize 时按码位截断，朴素 BPE 每段 O(MAX²) 约为常数开销。
+ * 截断处最多损失一个跨边界合并，误差有界，文档已声明该取舍。
+ */
 const MAX_SEG_CODES = 512
 
 /**
  * 对一段码位数组做 BPE 合并，返回 token id 列表。
  *
- * 朴素实现：每轮在所有相邻 pair 里取 rank 最小者合并（与 transformers/
- * tokenizers 的语义逐 id 一致）。段长 ≤ MAX_SEG_CODES，每段常数开销。
+ * 朴素实现：每轮在所有相邻 pair 里取 rank 最小者合并，与 transformers 和 tokenizers 的语义逐 id 一致。
+ * 段长 ≤ MAX_SEG_CODES，每段常数开销。
  */
 export function bpeMerge(codes: number[]): number[] {
   const rank = getRankMap()
@@ -285,8 +285,8 @@ export function bpeMerge(codes: number[]): number[] {
 }
 
 /**
- * 完整切分一段文本，返回 token id 序列（与 transformers encode 对齐：
- * special added token 直接输出其 id，其余文本正常 BPE）。
+ * 完整切分一段文本，返回 token id 序列，与 transformers encode 对齐。
+ * special added token 直接输出其 id，其余文本正常 BPE。
  */
 export function encodeText(text: string): number[] {
   const ids: number[] = []

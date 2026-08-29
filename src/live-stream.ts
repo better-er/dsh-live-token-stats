@@ -1,26 +1,17 @@
 /**
- * Real-time host→client live stream for dsh-live-token-stats.
+ * dsh-live-token-stats 的实时主机→客户端流。
  *
- * The official session-event projection pipeline is deliberately "settled":
- * values are pure folds over committed `SessionEvent`s, replayed from the log,
- * and there is no open seam for pushing externally-computed, wall-clock-live
- * figures through it (the browser projection seat only accepts fold driven
- * keys). Live token throughput is by nature an in-flight, wall-clock quantity,
- * not a replayable fold.
+ * 官方会话事件投影管线被刻意设计为「结算式」：数值是对已提交 `SessionEvent` 的纯折叠，从日志重放而来，没有开放的缝隙能把外部计算且墙钟实时的数据推进去，浏览器投影位置只接受折叠驱动的 key。
+ * 实时 token 吞吐本质是在途、墙钟量，不是可重放的折叠。
  *
- * So this module opens its OWN pure-plugin channel — no DSH source edits, so it
- * ships and installs anywhere:
+ * 于是本模块打开自己的纯插件通道，不改 DSH 源码，因此可在任何环境安装分发：
  *
- *   host:  `ctx.on('llm/stream', ...)` intercepts the raw per-chunk adapter
- *          stream (the same waterfall the official invariant wraps). For every
- *          text / reasoning / tool-call argument fragment it accumulates a
- *          sliding-window token rate per session (keyed by `options.sessionId`).
- *   host:  `ctx.connection.rpc.handle('/dsh-live-token-stats', ...)` serves the
- *          latest per-session live snapshot.
- *   client: polls that RPC endpoint a few times a second and renders it.
+ *   host：  `ctx.on('llm/stream', ...)` 拦截原始逐块 adapter 流，正是官方不变量包装的同一条瀑布流。对每个 text / reasoning / tool-call 参数片段，按会话 `options.sessionId` 累计一个滑动窗口 token 速率。
+ *   host：  `ctx.connection.rpc.handle('/dsh-live-token-stats', ...)` 提供每个会话最新的实时快照。
+ *   client：每秒轮询该 RPC 端点数次并渲染。
  *
- * This is "baseline push-like realtime" achievable by a distributable plugin:
- * RPC pull throttled at ~4/s. No frame-type registration, no runtime patch.
+ * 这是可分发插件能达到的「基线式近实时」：RPC 拉取限速在约 4/s。
+ * 无需注册帧类型，无需运行时补丁。
  *
  * @module dsh-live-token-stats/live-stream
  */
@@ -29,8 +20,7 @@ import { appendFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
-// Side-effect type import: pulls the host `ctx.connection` (HostConnectionHandle)
-// declaration merge from the connection package's host entry.
+// 副作用类型导入：从 connection 包的主机入口引入主机 `ctx.connection` 即 HostConnectionHandle 的声明合并。
 import '@deepseek-ai/dsh-client-connection'
 import type { ConnectionRpcHandler } from '@deepseek-ai/dsh-client-connection'
 import { transportError } from '@deepseek-ai/dsh-host-apiproxy/api'
@@ -46,9 +36,9 @@ import {
 import { EMPTY_UNESCAPE, unescapeFeed, type UnescapeState } from './tokenizer/unescape.ts'
 
 /**
- * 工具调用名（tool-call-delta 首个片段一次性携带）的 token 数。
- * 官方将模型生成的 tool-call JSON 完整计入 output，name 字段同为模型生成，
- * 此处补上 argumentsDelta 之外的缺口（消息外壳/模板结构费不补偿——见 DESIGN §10.x）。
+ * 工具调用名的 token 数，由 tool-call-delta 首个片段一次性携带。
+ * 官方将模型生成的 tool-call JSON 完整计入 output，name 字段同为模型生成，此处补上 argumentsDelta 之外的缺口。
+ * 消息外壳与模板结构费不补偿，见 DESIGN §10.x。
  */
 function toolCallNameTokens(chunk: StreamChunk, spec: Readonly<EstimatorSpec>): number {
   if (chunk.type !== 'tool-call-delta') return 0
@@ -57,21 +47,21 @@ function toolCallNameTokens(chunk: StreamChunk, spec: Readonly<EstimatorSpec>): 
   return spec.tokenizerMode === 'bpe' ? tokenCount(name) : estimateTextTokens(name, spec)
 }
 
-/** The token-bearing content of a delta chunk (empty when none). */
+/** 一个增量 chunk 携带 token 的内容，无 token 时为空串。 */
 function deltaTextOf(chunk: StreamChunk): string {
   if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') return chunk.text
   if (chunk.type === 'tool-call-delta') return (chunk as { argumentsDelta?: string }).argumentsDelta ?? ''
   return ''
 }
 
-/** Whether a chunk contributes streamed output tokens. */
+/** 判定一个 chunk 是否贡献流式输出 token。 */
 function isTokenDelta(chunk: StreamChunk): boolean {
   return chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta'
 }
 
 /**
- * 停顿判定阈值（毫秒）：相邻 delta 样本间隔达到该值才算「停顿/卡住」，
- * 计入累计停顿（stallMs）。低于阈值的毫秒级批处理间隙视为正常推流节奏。
+ * 停顿判定阈值毫秒。
+ * 相邻 delta 样本间隔达到该值才算「停顿/卡住」并计入累计停顿 stallMs，低于阈值的毫秒级批处理间隙视为正常推流节奏。
  */
 const STALL_GRACE_MS = 300
 
@@ -79,8 +69,8 @@ const STALL_GRACE_MS = 300
 
 /**
  * 诊断日志落盘位置：~/.dsh/dsh-live-token-stats-debug.jsonl。
- * 每行一个 JSON 记录（一次 llm/stream 流一行），字段见 {@link StreamDebugLog}。
- * 仅落盘，不向控制台输出（避免每流一行刷屏）；写入失败仍上报控制台。
+ * 每行一个 JSON 记录，即一次 llm/stream 流一行，字段见 {@link StreamDebugLog}。
+ * 仅落盘，不向控制台输出以避开每流一行刷屏，写入失败仍上报控制台。
  */
 const DEBUG_LOG_PATH = join(homedir(), '.dsh', 'dsh-live-token-stats-debug.jsonl')
 
@@ -100,37 +90,37 @@ function debugLog(record: Record<string, unknown>): void {
   }
 }
 
-/** 一次 llm/stream 流的诊断统计（拦截器内自维护，独立于 tracker 的速率口径）。 */
+/** 一次 llm/stream 流的诊断统计，拦截器内自维护，独立于 tracker 的速率口径。 */
 interface StreamDebugStats {
-  /** 该会话内第几次流（工具循环会触发多次）。 */
+  /** 该会话内第几次流，工具循环会触发多次。 */
   seq: number
-  /** GenerateOptions.model（可能缺省）。 */
+  /** GenerateOptions.model，可能缺省。 */
   model: string | undefined
-  /** 三类 delta 的字符数（同投影 deltaText 口径）。 */
+  /** 三类 delta 的字符数，同投影 deltaText 口径。 */
   chars: { text: number; reasoning: number; tool: number }
-  /** 本流的 BPE 增量切分状态（连续中文时 total 差分才有意义）。 */
+  /** 本流的 BPE 增量切分状态，连续中文时 total 差分才有意义。 */
   inc: IncrementalState
-  /** 本流的 tool-call 反转义悬空尾部（与 tracker/投影同口径）。 */
+  /** 本流的 tool-call 反转义悬空尾部，与 tracker 和投影同口径。 */
   esc: UnescapeState
-  /** 本流第一次出现 usage chunk 时的 BPE 累计（null = 流内无 usage）。 */
+  /** 本流第一次出现 usage chunk 时的 BPE 累计，流内无 usage 时为 null。 */
   bpeAtUsage: number | null
-  /** 流内最后一个 usage.outputTokens（null = 流内无 usage）。 */
+  /** 流内最后一个 usage.outputTokens，流内无 usage 时为 null。 */
   usageOutput: number | null
-  /** 官方 usage 拆分的推理 token 数（provider 未报告时为 null）。 */
+  /** 官方 usage 拆分的推理 token 数，provider 未报告时为 null。 */
   usageReasoning: number | null
-  /** 本流每个工具调用的 name/id/参数累计字符（回归消息外壳结构费用）。 */
+  /** 本流每个工具调用的 name/id/参数累计字符，用于回归消息外壳结构费用。 */
   tools: { name: string | null; id: string | null; argsChars: number }[]
-  /** 块 index → tools 数组下标（运行时态，不落日志）。 */
+  /** 块 index 到 tools 数组下标的映射，运行时态不落日志。 */
   toolByIdx: Map<number, number>
-  /** 本流逐 delta 完整序列（内容 + 每帧 ISO 时间；供离线对照官方计费口径）。 */
+  /** 本流逐 delta 完整序列，含内容与每帧 ISO 时间，供离线对照官方计费口径。 */
   frames: { t: string; ty: string; i: number; n?: string; id?: string; c: string }[]
 }
 
-/** One sliding-window rate cell for a session. */
+/** 一个会话的滑动窗口速率单元。 */
 interface RateCell {
   /** 窗口内的 token 样本，按到达时刻排序，超窗样本由 snapshot 滑出。 */
   samples: { time: number; tokens: number }[]
-  /** Last wall-clock ms a delta was folded (used only for client decay hints). */
+  /** 最后一次折叠某个 delta 的墙钟毫秒，仅供客户端衰减提示。 */
   updatedAt: number
   /** 本 step 起点，即拦截器记录到 llm/stream 事件的时刻，约等于请求发出时刻。 */
   stepStartAt: number
@@ -144,15 +134,15 @@ interface RateCell {
   esc: UnescapeState
 }
 
-/** The live snapshot served to the client for one session. */
+/** 提供给客户端、针对某个会话的实时快照。 */
 export interface LiveTokenSnapshot {
   /**
    * 实时速度 tok/s：窗口内累计 token 除以跨度。
-   * 跨度 = min(自 step 开始流逝时间, 窗口定值)，即刚开始时含首字延迟随窗口滑动
-   * 爬升，首字延迟摊完且流逝超过窗口后固定为窗口定值；超窗无样本则无值。
+   * 跨度 = min(自 step 开始流逝时间, 窗口定值)，即刚开始时含首字延迟随窗口滑动爬升，首字延迟摊完且流逝超过窗口后固定为窗口定值。
+   * 超窗无样本则无值。
    */
   tokensPerSecond?: number
-  /** Wall-clock epoch ms of the newest folded sample (client decays from here). */
+  /** 最新折叠样本的墙钟 epoch 毫秒，客户端从这里开始衰减。 */
   updatedAt: number
   /** 累计停顿毫秒，含进行中的当前停顿，间隔达 STALL_GRACE_MS 才计。 */
   stallMs: number
@@ -171,15 +161,15 @@ const INITIAL_RATE_CELL = (): RateCell => ({
 })
 
 /**
- * Real-time per-session token-rate tracker. Single-threaded (one host process);
- * `llm/stream` is serialized per request, so the map needs no locking.
+ * 实时的每会话 token 速率追踪器。
+ * 单线程即单一主机进程，`llm/stream` 按请求串行，因此映射无需加锁。
  */
 export class LiveTokenRateTracker {
   private readonly cells = new Map<string, RateCell>()
 
   constructor(private readonly spec: Readonly<EstimatorSpec>) {}
 
-  /** Fold one adapter chunk into its session's rate cell. Pure w.r.t. the stream. */
+  /** 把一个 adapter chunk 折叠进其会话的速率单元。相对流本身为纯函数。 */
   fold(sessionId: string | undefined, chunk: StreamChunk, timeMs: number): void {
     if (sessionId === undefined) return
     if (!isTokenDelta(chunk)) return
@@ -242,10 +232,9 @@ export class LiveTokenRateTracker {
   }
 
   /**
-   * Snapshot the cell's live rate AS OF `asOf`, defaults to `Date.now()`.
-   * 跨度恒 ≤ 窗口大小：开始阶段取 step 开始后的流逝时间，首字延迟随窗口滑动
-   * 爬升；流逝超过窗口后固定为窗口定值。停顿超窗后无样本，速率不发，数学上
-   * 未定义，客户端显示 0 兜底；stallMs 同步计入进行中的停顿。
+   * 按 `asOf` 时刻给单元做实时速率快照，`asOf` 缺省为 `Date.now()`。
+   * 跨度恒 ≤ 窗口大小：开始阶段取 step 开始后的流逝时间，首字延迟随窗口滑动爬升，流逝超过窗口后固定为窗口定值。
+   * 停顿超窗后无样本，速率不外发，数学上未定义，客户端显示 0 兜底；stallMs 同步计入进行中的停顿。
    */
   snapshot(sessionId: string, asOf: number = Date.now()): LiveTokenSnapshot {
     const cell = this.cells.get(sessionId)
@@ -272,15 +261,15 @@ export class LiveTokenRateTracker {
     return out
   }
 
-  /** Drop a session's cell (e.g. on turn/end or when no longer needed). */
+  /** 丢弃一个会话的单元，例如 turn/end 或不再需要时。 */
   reset(sessionId: string): void {
     this.cells.delete(sessionId)
   }
 }
 
 /**
- * Build the RPC channel handler backed by the tracker.
- * `endpoint` `snapshot` + `{ sessionId }` returns that session's live rate.
+ * 构建由追踪器支撑的 RPC 通道处理器。
+ * `endpoint` 为 `snapshot`、载荷含 `{ sessionId }` 时返回该会话的实时速率。
  */
 export function createLiveStreamRpcHandler(
   tracker: LiveTokenRateTracker,
@@ -298,12 +287,11 @@ export function createLiveStreamRpcHandler(
 }
 
 /**
- * Install the host half: intercept `llm/stream` and mount the RPC channel.
- * @param ctx - host plugin context (the same context used by `apply`).
- * @param spec - resolved estimator spec.
- * @param debug - 诊断日志开关（默认关）；开启时记录每流完整 delta 序列 + 官方 usage
- *   对照到 ~/.dsh/dsh-live-token-stats-debug.jsonl，关闭时拦截器零额外开销。
- * @returns the tracker (for tests / teardown) and a disposer.
+ * 安装主机端：拦截 `llm/stream` 并挂载 RPC 通道。
+ * @param ctx - 主机插件上下文，与 `apply` 用的是同一个上下文。
+ * @param spec - 已解析的估算器 spec。
+ * @param debug - 诊断日志开关，默认关；开启时把每流完整 delta 序列与官方 usage 对照记录到 ~/.dsh/dsh-live-token-stats-debug.jsonl，关闭时拦截器零额外开销。
+ * @returns 追踪器供测试与善后使用，以及一个销毁器。
  */
 export function installHostLiveStream(
   ctx: Context,
@@ -312,7 +300,7 @@ export function installHostLiveStream(
 ): { tracker: LiveTokenRateTracker; dispose: () => void } {
   const tracker = new LiveTokenRateTracker(spec)
 
-  // Prepend so we see chunks before the invariant validator (harmless either way).
+  // 前插：让我们先于不变量校验器看到 chunk（无论顺序都无害）。
   const streamSeq = new Map<string, number>()
   const offStream = ctx.on(
     'llm/stream',
@@ -339,8 +327,8 @@ export function installHostLiveStream(
           }
           : null
         for await (const chunk of next()) {
-          // timeMs: the adapter chunks carry no timestamp; use wall-clock so the
-          // client-rendered rate decays naturally with real time.
+          // timeMs：adapter 的 chunk 不带时间戳；用墙钟，让客户端渲染的速率
+          // 随真实时间自然衰减。
           const now = Date.now()
           tracker.fold(String(sessionId), chunk, now)
           // —— 诊断统计（与 fold 同一数据源，独立切分一遍，仅 debug 开启时运行）——
@@ -417,7 +405,7 @@ export function installHostLiveStream(
     { global: true, prepend: true },
   )
 
-  // Mount the client-pull RPC channel on the shared connection transport.
+  // 在共享连接传输上挂载客户端拉取用的 RPC 通道。
   let offRpc: (() => Promise<void>) | undefined
   const connection = ctx.connection
   if (connection !== undefined) {
@@ -437,5 +425,5 @@ export function installHostLiveStream(
   }
 }
 
-/** Re-export the estimator spec type for use in tests. */
+/** 重新导出估算器 spec 类型供测试使用。 */
 export type { EstimatorSpec as LiveStreamEstimatorSpec } from './estimator.ts'

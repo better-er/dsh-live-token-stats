@@ -1,35 +1,32 @@
 /**
- * Dual-density Unicode estimator for live output-token accounting.
+ * 用于实时输出 token 计数的双密度 Unicode 估算器。
  *
- * Provider usage is authoritative when it arrives; until then we price stream
- * deltas with a per-character density that distinguishes ASCII from CJK, per
- * the empirically common 1 token ≈ 3.33 ASCII chars / ≈ 1.67 CJK chars
- * (equivalently ASCII 0.3 / CJK 0.6 tokens-per-char). Both densities are
- * configurable, never hardcoded, and everything here is a pure function of its
- * arguments (safe to unit-test and to fold deterministically).
+ * 官方 usage 到达时以官方为准，在此之前按字符密度给流式增量计价，区分 ASCII 与 CJK。
+ * 当前经验值 1 token 约等于 3.33 个 ASCII 字符或 1.67 个 CJK 字符，即 ASCII 每字符 0.3 token、CJK 每字符 0.6 token。
+ * 两种密度均可配置、绝不写死，这里的一切都是其参数的纯函数，便于单元测试与确定性地折叠。
  *
  * @module dsh-live-token-stats/estimator
  */
 
-/** 计数模式：bpe = 真实 BPE 分词（默认，用户拍板）；density = 旧的双密度盲估。 */
+/** 计数模式：bpe 为真实 BPE 分词且默认采用，density 为旧的双密度盲估。 */
 export type TokenizerMode = 'bpe' | 'density'
 
-/** Default-density estimator settings (also the source of the Config schema). */
+/** 默认密度的估算器配置，同时是 Config schema 的来源。 */
 export interface EstimatorSpec {
-  /** ASCII characters per token fraction. */
+  /** 每 token 对应的 ASCII 字符数。 */
   readonly asciiTokenPerChar: number
-  /** CJK characters per token fraction. */
+  /** 每 token 对应的 CJK 字符数。 */
   readonly cjkTokenPerChar: number
-  /** Sliding window (ms) for the live TPS rate. */
+  /** 实时 TPS 速率的滑动窗口，单位为毫秒。 */
   readonly rateWindowMs: number
-  /** 计数模式：bpe（真实 BPE 切分）或 density（双密度盲估）。 */
+  /** 计数模式：bpe 为真实 BPE 切分，density 为双密度盲估。 */
   readonly tokenizerMode: TokenizerMode
 }
 
-/** Allow partial deployment-supplied config; resolved with defaults applied. */
+/** 允许只提供部分部署配置；缺失项用默认值补齐。 */
 export type EstimatorConfig = Partial<EstimatorSpec>
 
-/** Default values, exported for tests and for the Config schema defaults. */
+/** 默认值，导出供测试与 Config schema 默认值使用。 */
 export const ESTIMATOR_DEFAULTS: Readonly<EstimatorSpec> = Object.freeze({
   asciiTokenPerChar: 0.3,
   cjkTokenPerChar: 0.6,
@@ -38,15 +35,13 @@ export const ESTIMATOR_DEFAULTS: Readonly<EstimatorSpec> = Object.freeze({
 })
 
 /**
- * Resolve and validate deployment config into a fully-defaulted spec.
+ * 把部署配置解析并校验成完全带默认值的 spec。
  *
- * Unknown keys are ignored, not rejected: this runs inside a cordis plugin
- * `apply`, and the loader injects schema-defaulted keys (e.g. `enabled`) into
- * the very config object we receive. Treating an injected key as a hard error
- * aborts the whole plugin-tree load, so only the known estimator keys are
- * consumed; anything else is dropped (strict rejection lives in the unit tests,
- * where the caller controls the input). Numeric densities are still
- * range-checked so garbage cannot corrupt the live estimate.
+ * 未知 key 一律忽略而非拒绝。
+ * 本函数在 cordis 插件的 `apply` 内运行，loader 会把 schema 带默认值的 key 如 `enabled` 注入我们收到的同一个 config 对象。
+ * 把注入的 key 当作硬错误会让整个插件树加载中断，所以只消费已知的估算器 key，其余的一律丢弃。
+ * 严格拒绝逻辑放在单元测试里，那里由调用方掌控输入。
+ * 数值密度仍会做范围校验，避免脏数据污染实时估算。
  */
 export function resolveSpec(config: EstimatorConfig = {}): Readonly<EstimatorSpec> {
   const spec: EstimatorSpec = { ...ESTIMATOR_DEFAULTS, ...config }
@@ -66,15 +61,12 @@ export function resolveSpec(config: EstimatorConfig = {}): Readonly<EstimatorSpe
 }
 
 /**
- * Split a string into ASCII and CJK code-point counts.
+ * 求字符串的 ASCII 与 CJK 码点计数。
  *
- * Classification is deliberately binary: a code point is ASCII when it is in
- * 0x00-0x7F, otherwise it folds into the CJK bucket (priced at
- * `cjkTokenPerChar`). Emoji, Latin accents, Cyrillic, Arabic, Thai, and every
- * other non-ASCII codepoint land in the higher-density bucket: underpricing a
- * run of them is worse for a live token readout than treating them as
- * token-dense, and the ASCII class is the only one with a genuinely low
- * per-character token cost. Surrogate pairs count as one codepoint.
+ * 归类刻意做成二值，码点在 0x00-0x7F 视为 ASCII，否则折叠进 CJK 桶并按 `cjkTokenPerChar` 计价。
+ * Emoji、拉丁变音符、西里尔文、阿拉伯文、泰文及一切非 ASCII 码点都归入高密度桶。
+ * 实时读数低估一连串它们，比按 token 密集处理更糟，而 ASCII 类是唯一每字符 token 成本真正低的类别。
+ * 代理对按一个码点计数。
  */
 export function countAsciiCjk(text: string): { ascii: number; cjk: number } {
   if (typeof text !== 'string' || text.length === 0) return { ascii: 0, cjk: 0 }
@@ -90,7 +82,7 @@ export function countAsciiCjk(text: string): { ascii: number; cjk: number } {
   return { ascii, cjk }
 }
 
-/** Estimate the output tokens a piece of generated text represents. */
+/** 估算一段生成文本所代表的输出 token 数。 */
 export function estimateTextTokens(text: string, spec: Readonly<EstimatorSpec>): number {
   const { ascii, cjk } = countAsciiCjk(text)
   return Math.round(ascii * spec.asciiTokenPerChar + cjk * spec.cjkTokenPerChar)

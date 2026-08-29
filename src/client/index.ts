@@ -1,10 +1,6 @@
 /**
- * Browser plugin entry: mounts the live token-stats readout into the composer
- * dock (`conversation.composer.dock`). The real-time token/sec figure no longer
- * rides the session projection (settled, fold-driven); it is pulled through a
- * pure-plugin RPC channel the host half serves (`/dsh-live-token-stats`), which
- * in turn is fed by the `llm/stream` waterfall intercept — the raw per-chunk
- * adapter stream, tool-call argument fragments included.
+ * 浏览器插件入口：把实时 token 读数挂到 composer 停靠区 `conversation.composer.dock`。
+ * 实时 token/秒数字不再走会话投影，即结算式且折叠驱动，而是经由纯插件 RPC 通道拉取，由主机端提供 `/dsh-live-token-stats`，再由 `llm/stream` 瀑布流拦截喂养，即原始逐块 adapter 流含 tool-call 参数片段。
  *
  * @module dsh-live-token-stats/client
  */
@@ -12,32 +8,29 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
 import type { ClientConnectionRpc } from '@deepseek-ai/dsh-client-connection/client'
-// Type-only: merges the ui-conversation SlotMap declaration so the
-// 'conversation.composer.dock' slot name type-checks on the slots registry.
+// 仅类型：合并 ui-conversation 的 SlotMap 声明，让 'conversation.composer.dock' 槽位名在 slots 注册表里通过类型检查。
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import { LiveTokenStatsLine } from './LiveTokenStatsLine.tsx'
 
-/** Plugin name (= the config entry id). */
+/** 插件名即配置项 id。 */
 export const name = 'dsh-live-token-stats'
-/** Client services this plugin needs (slots + the connection RPC carrier). */
+/** 本插件需要的客户端服务，即槽位加 connection RPC 载体。 */
 export const inject = ['slots', 'connection']
 
-/** The business face injected into the readout component by the registration. */
+/** 注册时注入读数组件的业务面。 */
 export interface LiveTokenStatsLineInjected {
-  /** Connection RPC caller (the host half serves `/dsh-live-token-stats`). */
+  /** Connection RPC 调用器，主机端提供 `/dsh-live-token-stats`。 */
   readonly rpc: ClientConnectionRpc
 }
 
 /**
- * Register the readout into the composer dock. The dock owner share supplies
- * the session-scoped `useProjection` seat and `sessionId`; we additionally
- * inject the connection RPC caller for the live rate pull.
- * @param ctx - client root context.
+ * 把读数注册进 composer 停靠区。
+ * 停靠区所属方提供会话作用域的 `useProjection` 座位和 `sessionId`，我们另外注入 connection RPC 调用器用于实时速率拉取。
+ * @param ctx - 客户端根上下文。
  */
 export function apply(ctx: ClientContext): void {
-  // `ctx.connection` is provided by the connection service; on the browser the
-  // face is `ConnectionHandle` (host and client bundles ship separate
-  // declarations of `Context.connection`, so read it through a narrow cast).
+  // `ctx.connection` 由 connection 服务提供，浏览器端的面是 `ConnectionHandle`。
+  // 主机与客户端 bundle 各自独立声明 `Context.connection`，因此经一次收窄转换读取。
   const connection = (ctx as unknown as { connection: ConnectionHandle }).connection
   ctx.slots.inject('conversation.composer.dock', () =>
     ctx.slots.register(

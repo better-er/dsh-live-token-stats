@@ -1,0 +1,73 @@
+name: Release
+
+# 推送形如 vX.Y.Z 如 v0.3.0 的 tag 时触发自动发布：
+#   校验版本号一致 → 构建 → 发布 npm → 生成 GitHub Release draft。
+# 与仓库「bump v0.x.x」的手动发版节奏保持一致，不打 tag 不做任何发布。
+# 注意：npm 发布依赖仓库设置的 Secrets → NPM_TOKEN，未配置时发布步骤会失败。
+on:
+  push:
+    tags:
+      - 'v*'
+
+# 只读代码 + 可写 Release 用于创建草稿；发布 npm 用 token，不需要 id-token。
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Publish ${{ github.ref_name }} to npm
+    runs-on: ubuntu-latest
+    # fork 永不触发 tag 发布，仅作为兜底防护。
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          # 设置 npm 发布认证令牌，作用域指向 npm registry。
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 防呆：tag 与 package.json 版本不一致直接中止，避免发错号。
+      - name: Verify tag matches package.json version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          echo "tag version = $TAG ; package.json version = $PKG"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error:: tag($TAG) 与 package.json($PKG) 版本不一致，已中止发布"
+            exit 1
+          fi
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Publish to npm
+        run: pnpm publish --no-git-checks --ignore-scripts
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release draft
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true

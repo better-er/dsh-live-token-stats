@@ -1,16 +1,11 @@
 /**
- * Host half of dsh-live-token-stats.
+ * dsh-live-token-stats 的主机端。
  *
- * Two independent halves:
- *  1. The replayable `liveTokenStats` session projection (official
- *     sessionProjections registry) — settled output estimate + TTFT timing.
- *  2. A live host→client channel for the REAL-TIME token rate: the
- *     `llm/stream` waterfall intercept folds raw per-chunk adapter deltas
- *     (text / reasoning / tool-call argument fragments — the genuinely
- *     streamed, unaggregated source) into a per-session sliding-window rate,
- *     served to the browser over a plugin-owned RPC channel
- *     (`/dsh-live-token-stats`). Pure plugin, no DSH source edits, ships
- *     anywhere.
+ * 两个相互独立的部分：
+ *  1. 可重放的 `liveTokenStats` 会话投影，官方 sessionProjections 注册表，提供结算后的输出估算与 TTFT 计时。
+ *  2. 实时 token 速率的主机→客户端通道：`llm/stream` 瀑布流拦截把原始逐块 adapter 增量含 text、reasoning 与 tool-call 参数片段折叠成每个会话的滑动窗口速率，再经插件自有的 RPC 通道 `/dsh-live-token-stats` 提供给浏览器。
+ *
+ * 纯插件实现，不改 DSH 源码，可随处安装分发。
  *
  * @module dsh-live-token-stats
  */
@@ -21,25 +16,25 @@ import { ESTIMATOR_DEFAULTS, resolveSpec, type EstimatorConfig } from './estimat
 import { createLiveTokenStatsDefinition } from './projection.ts'
 import { installHostLiveStream } from './live-stream.ts'
 
-/** Plugin name (= the cordis config entry id). */
+/** 插件名即 cordis 配置项 id。 */
 export const name = 'dsh-live-token-stats'
-/** Host services this plugin needs. */
+/** 本插件需要的主机服务。 */
 export const inject = ['sessionProjections', 'connection']
 
-/** Plugin configuration: estimator densities plus a master switch. */
+/** 插件配置：估算器密度参数外加一个总开关。 */
 export interface Config extends EstimatorConfig {
-  /** Master switch for the whole capability. */
+  /** 整套能力的总开关。 */
   enabled?: boolean
   /**
-   * 诊断日志开关（默认关，发布零污染）。
-   * 开启后在 ~/.dsh/dsh-live-token-stats-debug.jsonl 记录每流完整 delta 序列
-   * 与官方 usage 对照（定位估算偏差用）；关闭时拦截器零开销。也可用环境变量
-   * DSH_LIVE_TOKEN_STATS_DEBUG=1 开启，免改配置。
+   * 诊断日志开关，默认关，发布零污染。
+   * 开启后在 ~/.dsh/dsh-live-token-stats-debug.jsonl 记录每流完整 delta 序列并与官方 usage 对照，用于定位估算偏差。
+   * 关闭时拦截器零开销。
+   * 也可用环境变量 DSH_LIVE_TOKEN_STATS_DEBUG=1 开启，免改配置。
    */
   debug?: boolean
 }
 
-/** Runtime schema for {@link Config} (default applied by the loader). */
+/** {@link Config} 的运行时 schema，默认值由 loader 应用。 */
 export const Config: z<Config> = z.object({
   enabled: z.boolean().default(true),
   asciiTokenPerChar: z.number().min(0.01).default(ESTIMATOR_DEFAULTS.asciiTokenPerChar),
@@ -52,9 +47,9 @@ export const Config: z<Config> = z.object({
 })
 
 /**
- * Register the liveTokenStats projection and the live host→client channel.
- * @param ctx - host plugin context.
- * @param config - resolved plugin config (schema defaults applied by the loader).
+ * 注册 liveTokenStats 投影与实时主机→客户端通道。
+ * @param ctx - 主机插件上下文。
+ * @param config - 已解析的插件配置，schema 默认值由 loader 应用。
  */
 export function apply(ctx: Context, config: Config = {}): void {
   if (config.enabled === false) return
@@ -64,12 +59,12 @@ export function apply(ctx: Context, config: Config = {}): void {
   // 调试日志：配置开关优先，环境变量兜底（免改配置的开发快捷方式）。
   const debug = debugConfig === true || process.env.DSH_LIVE_TOKEN_STATS_DEBUG === '1'
 
-  // 1) Replayable settled projection (session events).
+  // 其一：可重放的结算投影，处理会话事件。
   ctx.inject(['sessionProjections'], (projectionCtx) => {
     projectionCtx.sessionProjections.register(createLiveTokenStatsDefinition(spec))
   })
 
-  // 2) Live real-time channel (llm/stream intercept + RPC serve).
+  // 其二：实时通道，拦截 llm/stream 并提供 RPC。
   const live = installHostLiveStream(ctx, spec, debug)
   ctx.effect(() => live.dispose, 'dsh-live-token-stats: live stream teardown')
 }

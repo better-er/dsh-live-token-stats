@@ -1,6 +1,6 @@
 // 由 scripts/export-tokenizer-data.mjs 生成，勿手改。
 // 数据来源：DeepSeek-V4-Flash tokenizer（HF 格式；vocab/merges 与 V3 逐字节相同）。
-// fingerprint: 7c73540d49fb552b，merges: 127741，vocabSize: 128000，addedTokens: 1283
+// fingerprint: 7c73540d49fb552b, merges: 127741, vocabSize: 128000, addedTokens: 1283
 
 /** BPE 基础词表大小；合并产物 token id = VOCAB_SIZE + rank。 */
 export const VOCAB_SIZE = 128000

@@ -1,13 +1,9 @@
 /**
- * Unit tests for the live rate tracker — the real-time host half that folds
- * raw `llm/stream` adapter chunks (text / reasoning / tool-call argument
- * fragments) into a per-session windowed tokens/sec figure.
+ * 实时速率追踪器的单元测试：把原始 `llm/stream` adapter 块折叠成每会话窗口化 tok/秒数字的实时主机端。
+ * 块包括 text、reasoning 与 tool-call 参数片段。
  *
- * Focuses on the contracts the session-event projection cannot cover: the
- * same-timestamp burst guard, window expiry, the TTFT-inclusive span that
- * slides from step start up to the window size then stays fixed, stall
- * accounting, and idle reset. All snapshots pass an explicit `asOf` so the
- * simulated timelines never collide with the real clock.
+ * 聚焦会话事件投影无法覆盖的约定：同一时间戳的突发防护、窗口过期、含 TTFT 的跨度即从 step 开始滑到窗口大小后固定、停顿记账、空闲重置。
+ * 所有快照都显式传 `asOf`，让模拟时间线永不相撞真实时钟。
  */
 
 import { describe, expect, it } from 'vitest'
@@ -52,7 +48,7 @@ describe('LiveTokenRateTracker', () => {
 
   it('computes a sane rate for sparse text deltas', () => {
     const t = new LiveTokenRateTracker(SPEC)
-    // 100 tokens across 1 second → ~100 tok/s.
+    // 1 秒内 100 token → 约 100 tok/s。
     for (let i = 0; i < 10; i += 1) {
       t.fold(SESSION, tenTokenFrame(), 1000 + i * 100)
     }
@@ -64,8 +60,7 @@ describe('LiveTokenRateTracker', () => {
 
   it('does NOT explode on a huge same-timestamp tool-call argument delta (burst guard)', () => {
     const t = new LiveTokenRateTracker(SPEC)
-    // 一条 13.5k 字符的参数 delta 单帧到达：13554 * 0.3 ≈ 4066 token，
-    // 50ms 下限兜底，速率有界，不会除零爆表。
+    // 一条 13.5k 字符的参数 delta 单帧到达，13554 × 0.3 ≈ 4066 token，50ms 下限兜底，速率有界，不会除零爆表。
     t.fold(SESSION, toolCallDelta('x'.repeat(13554)), 5000)
     const snap = t.snapshot(SESSION, 5000)
     expect(snap.tokensPerSecond).toBeDefined()

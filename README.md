@@ -89,6 +89,13 @@ dsh plugin --profile web remove dsh-live-token-stats
 - 纯插件自包含，不改 DSH 源码。
 - 构建：`pnpm install` 后依次执行 `pnpm typecheck`、`pnpm test`、`pnpm build`；源码在 `src/`，发布产物在 `lib/`，由 tsdown 构建，运行时加载的是 lib。
 
+## 开发、CI 与发布
+
+- 仓库托管于 GitHub，主分支 `master`。所有改动经 **PR** 合入 `master`，`master` 建议开启分支保护，拒绝直接 push 与 force push。
+- **CI**：`.github/workflows/ci.yml` 在 `master` 的 push 与所有 PR 上自动执行 `typecheck → test → build`，全绿是合并门槛。
+- **CD**：`.github/workflows/release.yml` 在推送 `vX.Y.Z` tag 如 `v0.3.0` 时自动发布——校验版本号一致后构建、发布到 npm、并生成 GitHub Release 草稿人工确认。npm 发布需先配置仓库 `NPM_TOKEN` secret。
+- 具体分支、提交、PR 约定见 [CONTRIBUTING.md](./CONTRIBUTING.md) 与 PR 模板。
+
 ## License
 
 [MIT](./LICENSE)
