@@ -65,7 +65,7 @@ function isTokenDelta(chunk: StreamChunk): boolean {
  */
 const STALL_GRACE_MS = 300
 
-// --- 诊断日志（临时插桩：定位「估算 vs 官方 usage 偏差不为 0」；验证后移除） ---
+// --- 诊断日志，临时插桩：定位「估算 vs 官方 usage 偏差不为 0」，验证后移除 ---
 
 /**
  * 诊断日志落盘位置：~/.dsh/dsh-live-token-stats-debug.jsonl。
@@ -186,8 +186,7 @@ export class LiveTokenRateTracker {
       cell.stallMs += timeMs - cell.lastSampleAt
     }
     let tokensAdded = nameTokens
-    // 工具参数先反转义再计数：官方按解码后的实际内容计费，delta 是 JSON 转义原文
-    // （DESIGN §10.6；跨帧悬空尾部在 cell.esc 上）。
+    // 工具参数先反转义再计数：官方按解码后的实际内容计费，delta 是 JSON 转义原文，DESIGN §10.6，跨帧悬空尾部在 cell.esc 上。
     let esc = cell.esc
     let countText = text
     if (chunk.type === 'tool-call-delta' && text.length > 0) {
@@ -199,7 +198,7 @@ export class LiveTokenRateTracker {
     if (countText.length > 0) {
       if (this.spec.tokenizerMode === 'bpe') {
         const r = incrementalFeed(inc, countText)
-        // 实时口径：取 total 增量（含尾段未定界 token；连续中文停在尾段时 added 恒 0）
+        // 实时口径：取 total 增量，含尾段未定界 token，连续中文停在尾段时 added 恒 0
         tokensAdded += incrementalTotal(r.state) - incrementalTotal(inc)
         inc = r.state
       } else {
@@ -300,7 +299,7 @@ export function installHostLiveStream(
 ): { tracker: LiveTokenRateTracker; dispose: () => void } {
   const tracker = new LiveTokenRateTracker(spec)
 
-  // 前插：让我们先于不变量校验器看到 chunk（无论顺序都无害）。
+  // 前插：让我们先于不变量校验器看到 chunk，无论顺序都无害。
   const streamSeq = new Map<string, number>()
   const offStream = ctx.on(
     'llm/stream',
@@ -331,7 +330,7 @@ export function installHostLiveStream(
           // 随真实时间自然衰减。
           const now = Date.now()
           tracker.fold(String(sessionId), chunk, now)
-          // —— 诊断统计（与 fold 同一数据源，独立切分一遍，仅 debug 开启时运行）——
+          // —— 诊断统计，与 fold 同一数据源，独立切分一遍，仅 debug 开启时运行——
           if (d !== null) {
             if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta') {
               const frame: { t: string; ty: string; i: number; n?: string; id?: string; c: string } = {
@@ -353,7 +352,7 @@ export function installHostLiveStream(
                   if (t.name === null && chunk.name !== undefined) t.name = chunk.name
                   t.argsChars += chunk.argumentsDelta.length
                 }
-                // 仅当确实带内容才入 frames（空参数的首帧 name 也保留）
+                // 仅当确实带内容才入 frames，空参数的首帧 name 也保留
                 if (chunk.argumentsDelta.length > 0 || chunk.name !== undefined) d.frames.push(frame)
               } else {
                 d.frames.push(frame)
@@ -363,7 +362,7 @@ export function installHostLiveStream(
                 if (chunk.type === 'text-delta') d.chars.text += text.length
                 else if (chunk.type === 'reasoning-delta') d.chars.reasoning += text.length
                 else d.chars.tool += text.length
-                // 与 tracker/投影同口径：工具参数反转义后再计数（frames 保留原始 delta 供离线对照）
+                // 与 tracker/投影同口径：工具参数反转义后再计数，frames 保留原始 delta 供离线对照
                 const unesc = chunk.type === 'tool-call-delta' ? unescapeFeed(d.esc, text) : null
                 if (unesc !== null) {
                   d.esc = unesc.state
@@ -391,7 +390,7 @@ export function installHostLiveStream(
             model: d.model,
             chars: d.chars,
             bpe: incrementalTotal(d.inc),
-            // usage 提前到达而流还有后续 delta 时 bpeAtUsage < bpe（投影 exact 后会忽略剩余 delta）。
+            // usage 提前到达而流还有后续 delta 时 bpeAtUsage < bpe，投影 exact 后会忽略剩余 delta。
             bpeAtUsage: d.bpeAtUsage,
             usageOutput: d.usageOutput,
             usageReasoning: d.usageReasoning,

@@ -40,7 +40,7 @@ export const Config: z<Config> = z.object({
   asciiTokenPerChar: z.number().min(0.01).default(ESTIMATOR_DEFAULTS.asciiTokenPerChar),
   cjkTokenPerChar: z.number().min(0.01).default(ESTIMATOR_DEFAULTS.cjkTokenPerChar),
   rateWindowMs: z.number().min(0).default(ESTIMATOR_DEFAULTS.rateWindowMs),
-  // 真实 BPE 分词（默认，用户拍板）；'density' 回退到双密度盲估
+  // 真实 BPE 分词，默认，用户拍板；'density' 回退到双密度盲估
   // schemastery 无 z.enum，用 union 实现二选一
   tokenizerMode: z.union([z.const('bpe'), z.const('density')]).default(ESTIMATOR_DEFAULTS.tokenizerMode),
   debug: z.boolean().default(false),
@@ -53,10 +53,10 @@ export const Config: z<Config> = z.object({
  */
 export function apply(ctx: Context, config: Config = {}): void {
   if (config.enabled === false) return
-  // `enabled` 是插件开关(由 loader 注入默认值),并非 estimator 配置,剥离后再解析
+  // `enabled` 是插件开关，由 loader 注入默认值，并非 estimator 配置，剥离后再解析
   const { enabled: _enabled, debug: debugConfig, ...estimatorConfig } = config
   const spec = resolveSpec(estimatorConfig)
-  // 调试日志：配置开关优先，环境变量兜底（免改配置的开发快捷方式）。
+  // 调试日志：配置开关优先，环境变量兜底，免改配置的开发快捷方式。
   const debug = debugConfig === true || process.env.DSH_LIVE_TOKEN_STATS_DEBUG === '1'
 
   // 其一：可重放的结算投影，处理会话事件。

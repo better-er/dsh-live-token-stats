@@ -14,14 +14,10 @@
 import { ADDED_TOKENS, MERGE_PAIRS, VOCAB_B64, VOCAB_SIZE } from './data.ts'
 import { bytesToChars, charToBytes } from './bytes.ts'
 
-// --- pre_tokenizer 正则（与 tokenizer.json 逐字节一致，u flag 启用 \p{}） ---
-// 注意：R1/R3 不能用 JS 正则字面量手写转写——`\\-` 在 JSON 字符串里是
-// 「字面反斜杠+连字符」（正则引擎收到字面反斜杠），手写 `\-` 只是转义
-// 连字符，会漏匹配。直接以 JSON 解析后的字符串构造 RegExp，与 Rust 同源。
+// --- pre_tokenizer 正则：与 tokenizer.json 逐字节一致，gu flag 启用 \p{} 与全局匹配 ---
+// 注意：R1/R3 不能用 JS 正则字面量手写转写，因为 `\\-` 在 JSON 字符串里是「字面反斜杠+连字符」，正则引擎收到字面反斜杠，手写 `\-` 只是转义连字符会漏匹配；直接以 JSON 解析后的字符串构造 RegExp，与 Rust 同源。
 const RE_DIGITS = new RegExp('\\p{N}{1,3}', 'gu')
-// 字符类 [一-龥-龥-龥-龥-龥-龥぀-ゟ゠-ヿ] 的 `-` 在 Rust 正则里被解析为
-// range 分隔符（冗余 range，不含字面连字符）；JS 引擎却会把这种冗余 range
-// 解析出字面 `-`，因此 R2 写成去冗余等价形式（语义与 Rust 相同，已验证）。
+// 字符类 [一-龥぀-ゟ゠-ヿ] 的 `-` 在 Rust 正则里被解析为 range 分隔符，即冗余 range，不含字面连字符；JS 引擎却会把这种冗余 range 解析出字面 `-`，因此 R2 写成去冗余等价形式，语义与 Rust 相同，已验证。
 const RE_CJK = /[一-龥぀-ゟ゠-ヿ]+/gu
 const RE_WORDS = new RegExp(
   '[!"#$%&\'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\\r\\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+',
@@ -57,7 +53,7 @@ export interface PreToken {
 /**
  * pre_tokenizer：依次应用三条 split 加 ByteLevel，返回段列表。
  * 段长不限——v0.3 起 bpeMerge 用 O(n log n) 堆实现，可安全处理任意长度段，
- * 不再需要 MAX_SEG_CODES 截断（截断反而会损失跨边界合并、引入误差）。
+ * 不再需要 MAX_SEG_CODES 截断，截断反而会损失跨边界合并并引入误差。
  */
 export function preTokenize(text: string): PreToken[] {
   const segs = splitKeep(text, RE_DIGITS)
@@ -66,7 +62,7 @@ export function preTokenize(text: string): PreToken[] {
   return segs.map((s) => ({ text: s, codes: bytesToChars(charToBytes(s)) }))
 }
 
-// --- added tokens：trie 最长前缀匹配（按码点），命中且 special=true 直接出 id ---
+// --- added tokens：trie 最长前缀匹配，按码点进行，命中且 special=true 直接出 id ---
 interface AddedNode {
   next: Map<string, AddedNode>
   id?: number
@@ -237,13 +233,12 @@ function getVocabMap(): Map<string, number> {
 /**
  * 对一段码位数组做 BPE 合并，返回 token id 列表。
  *
- * O(n log n) 堆实现（v0.3）：最小堆（按 rank）+ 邻接双链表 + 惰性删除。
- * 与朴素全扫版语义逐 id 一致：merges rank 全局唯一（=数组下标），每轮最小 pair 唯一，
+ * O(n log n) 堆实现 v0.3：最小堆按 rank，配邻接双链表与惰性删除。
+ * 与朴素全扫版语义逐 id 一致：merges rank 全局唯一=数组下标，每轮最小 pair 唯一，
  * 堆顶即朴素版全扫选中的同一个 pair，因此两个版本合并轨迹完全相同，可直接对拍。
  *
  * 正确性要点：
- *  - 惰性删除：合并后旧候选不主动删，弹出时校验（left 仍 live、right 存在且 live、
- *    实时 rank 与入堆时一致），不通过则丢弃重弹，避免 O(n) 的删除维护。
+ *  - 惰性删除：合并后旧候选不主动删，弹出时校验 left 仍 live、right 存在且 live、实时 rank 与入堆时一致，不通过则丢弃重弹，避免 O(n) 的删除维护。
  *  - 每节点至多合并一次，每个 pair 进出堆 O(log n)，总 O(n log n)。
  *  - rank 平局时用显式次键 (rank, leftIdx) 保证确定性：与朴素版「取首个最小 index」一致。
  */
@@ -252,7 +247,7 @@ export function bpeMerge(codes: number[]): number[] {
   const vocab = getVocabMap()
   const n = codes.length
   if (n === 0) return []
-  // 节点：str=当前符号、prev/next=链表邻居下标(-1 为端)、dead=已被并入别的符号
+  // 节点：str=当前符号、prev/next=链表邻居下标，-1 为端、dead=已被并入别的符号
   const nodes: Array<{ str: string; prev: number; next: number; dead: boolean }> = []
   for (let i = 0; i < n; i += 1) {
     nodes.push({
@@ -262,7 +257,7 @@ export function bpeMerge(codes: number[]): number[] {
       dead: false,
     })
   }
-  // pair 元素 {rank,left}；rank 为 (left 与其右邻) 的合并 rank，+∞ 表示无此合并
+  // pair 元素 {rank, left}；rank 为 (left, 其右邻) 的合并 rank，+∞ 表示无此合并
   const pairRank = (l: number): number => {
     const r = nodes[l].next
     if (r === -1) return Number.POSITIVE_INFINITY
@@ -311,7 +306,7 @@ export function bpeMerge(codes: number[]): number[] {
     const l = e.left
     const r = nodes[l].next
     if (r === -1 || nodes[l].dead || nodes[r].dead) continue // 候选已失效，丢弃重弹
-    if (pairRank(l) !== e.rank) continue // 实时 rank 变更（邻域被重排），丢弃
+    if (pairRank(l) !== e.rank) continue // 实时 rank 变更，邻域被重排，丢弃
     const prev = nodes[l].prev
     const next = nodes[r].next
     const newIdx = nodes.length
@@ -329,7 +324,7 @@ export function bpeMerge(codes: number[]): number[] {
       if (Number.isFinite(nr)) push(nr, newIdx)
     }
   }
-  // 结果 = 沿链表遍历活节点查 vocab id（链头是唯一 prev===-1 的活节点）
+  // 结果 = 沿链表遍历活节点查 vocab id，链头是唯一 prev===-1 的活节点
   const ids: number[] = []
   let head = nodes.findIndex((nd) => !nd.dead && nd.prev === -1)
   while (head !== -1) {

@@ -85,8 +85,8 @@ function countDeltaTokens(
   inc: IncrementalState,
 ): { added: number; inc: IncrementalState } {
   if (spec.tokenizerMode === 'bpe') {
-    // 阈值口径：取 total 的增量（含尾段中尚未定界的 token）——
-    // 连续中文无段边界时会全部滞留在尾段，added(已结算) 恒 0，不适用。
+    // 阈值口径：取 total 的增量，含尾段中尚未定界的 token——
+    // 连续中文无段边界时会全部滞留在尾段，added 已结算恒 0，不适用。
     const r = incrementalFeed(inc, text)
     const delta = incrementalTotal(r.state) - incrementalTotal(inc)
     return { added: delta, inc: r.state }
@@ -184,7 +184,7 @@ export function activeStepApply(
     const text = deltaText(chunk)
     const nameTokens = toolCallNameTokens(chunk, spec)
     if (text.length === 0 && nameTokens === 0) return state
-    // 工具参数先反转义再计数（跨帧悬空尾部挂在 esc 状态上）
+    // 工具参数先反转义再计数，跨帧悬空尾部挂在 esc 状态上
     const esc = chunk.type === 'tool-call-delta' ? decodeToolArgument(text, state.esc) : undefined
     const countText = esc !== undefined ? esc.text : text
     const { added, inc } =
@@ -304,7 +304,7 @@ export function throughputApply(
     const text = deltaText(chunk)
     const nameTokens = toolCallNameTokens(chunk, spec)
     if (text.length === 0 && nameTokens === 0) return state
-    // 工具参数先反转义再计数（跨帧悬空尾部挂在 esc 状态上）
+    // 工具参数先反转义再计数，跨帧悬空尾部挂在 esc 状态上
     const esc = chunk.type === 'tool-call-delta' ? decodeToolArgument(text, state.esc) : undefined
     const countText = esc !== undefined ? esc.text : text
     const { added, inc } =
@@ -435,7 +435,7 @@ export function createLiveTokenStatsDefinition(
       }),
     },
     // 仅当序列化状态字段或折叠语义变化时才递增。
-    // v4：tool-call 参数反转义（esc 状态）——官方按解码后内容计费。
+    // v4：tool-call 参数反转义，esc 状态——官方按解码后内容计费。
     stateVersion: 4,
   }
 }

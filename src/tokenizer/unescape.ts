@@ -56,7 +56,7 @@ export function unescapeFeed(
         return { text: out, state: { tail: s.slice(i) } }
       }
       if (!RE_HEX4.test(hex)) {
-        // 非法 \u 序列（后随非 hex）：按原样保留 `\u`，后续字符照常。
+        // 非法 \u 序列，后随非 hex，按原样保留 `\u`，后续字符照常。
         out += '\\u'
         i += 2
         continue
