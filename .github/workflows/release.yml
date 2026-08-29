@@ -65,11 +65,13 @@ jobs:
         with:
           version: 9
 
+      # setup-node 的 registry-url 告知 npm 向哪个 registry 换 Trusted Publishing 临时凭证。
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
+          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -79,20 +81,6 @@ jobs:
 
       - name: Build
         run: pnpm build
-
-      # 诊断：确认 Trusted Publishing 的 OIDC 令牌已注入（若为空说明 id-token 未生效）。
-      - name: Check OIDC token presence
-        run: |
-          if [ -n "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ]; then
-            echo "OIDC URL: present (${ACTIONS_ID_TOKEN_REQUEST_URL}?audience=dsh)"
-            echo "OIDC token: ${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+present}"
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=sigstore" | jq -r 'if .value then "OIDC id_token length: " + (.value|length|tostring) else "fetch-error: " + (.message // "unknown") end'
-          else
-            echo "OIDC: MISSING — id-token: write not injected; will fall back to unauth (ENEEDAUTH)"
-          fi
-        shell: bash
 
       # Trusted Publishing：npm 凭 workflow 的 OIDC 身份直接授权，
       # 无需 NPM_TOKEN；--provenance 会在 npm 上附构建来源证明。
