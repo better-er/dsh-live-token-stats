@@ -9,9 +9,11 @@ on:
     tags:
       - 'v*'
 
-# 读代码 + 写 master 以回写版本号 + 写 Release 用于创建草稿；npm 用 token 发布。
+# 读代码 + 写 master 以回写版本号 + 写 Release 用于创建草稿。
+# id-token: write 供 Trusted Publishing 换取 npm 临时凭证，无需 NPM_TOKEN。
 permissions:
   contents: write
+  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -69,8 +71,6 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          # 设置 npm 发布认证令牌，作用域指向 npm registry。
-          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -81,10 +81,10 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Trusted Publishing：npm 凭 workflow 的 OIDC 身份直接授权，
+      # 无需 NPM_TOKEN；--provenance 会在 npm 上附构建来源证明。
       - name: Publish to npm
-        run: pnpm publish --no-git-checks --ignore-scripts
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public
 
       - name: Create GitHub Release draft
         uses: softprops/action-gh-release@v2
