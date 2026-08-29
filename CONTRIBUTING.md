@@ -44,7 +44,7 @@ pnpm build       # 构建产物到 lib/，tsdown
 
 1. 从最新 `master` 拉出功能分支，提交改动。
 2. 本地先过 `pnpm typecheck && pnpm test && pnpm build`。
-3. 提 PR 到 `master`，按 `.github/pull_request_template.md` 填写描述与自测勾选。
+3. 提 PR 到 `master`，按正文自述改动与自测情况；描述建议覆盖：改动内容、自测勾选、行为变化、测试说明。
 4. 触发 `ci.yml`：它会在 `master` 的 push 与所有 PR 上自动跑 typecheck + test + build。
 5. **CI 全绿是合并门槛**；reviewer 人工复核后合并，master 建议开启分支保护，拒绝 force push 与直接 push。
 
@@ -55,7 +55,7 @@ pnpm build       # 构建产物到 lib/，tsdown
 - **发布 = 打 tag**：推送形如 `v0.3.0` 的 tag 即自动发版，不再需要手动改版本号。`release.yml` 自动执行：
   1. 凭 tag 号把 `package.json` 版本更新为对应值，并提交回 `master`；
   2. 测试加构建；
-  3. 发布到 npm，需仓库已配置 `Secrets → NPM_TOKEN`；
+  3. 发布到 npm，走 Trusted Publishing：需先在 npm 包管理页把此仓库的 GitHub Actions 绑定到对应包（Enable trusted publishing → GitHub Actions → owner/仓库/branch），无需配置 NPM_TOKEN；
   4. 生成 GitHub Release **草稿**，人工确认后正式公布。
 - 人只负责决定发哪个版本并打对应 tag。注意需先在 `master` 合入待发代码，再打 tag，否则发布的是旧代码。
 
