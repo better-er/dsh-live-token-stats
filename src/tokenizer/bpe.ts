@@ -2,14 +2,20 @@
  * DeepSeek-V3/V4 字节级 BPE 的纯函数实现（与 HF transformers 的
  * `encode(add_special_tokens=false)` 逐 token id 对齐）。
  *
- * 流程：pre_tokenizer（三条 Isolated Split + ByteLevel）→ 每段内按 merges
- * rank 迭代合并 → 返回 token id 序列。数据来自 src/tokenizer/data.ts
- * （由 scripts/export-tokenizer-data.mjs 从 HF tokenizer.json 生成）。
+ * 流程：added tokens 的最长前缀匹配（trie；命中且 special=true 时直接输出
+ * 该 token id，其余命中视为普通文本）→ pre_tokenizer（三条 Isolated Split +
+ * ByteLevel）→ 每段内按 merges rank 迭代合并 → 返回 token id 序列。
+ * 数据来自 src/tokenizer/data.ts（由 scripts/export-tokenizer-data.mjs 从
+ * HF tokenizer.json 生成）。
+ *
+ * 注：与 transformers 的差异仅在 non-special added token——它们命中后依然按
+ * 普通文本走完整 BPE（tokenizers 的 split 默认 true 即递归 tokenize 该区间），
+ * 不产生独占 token id（已实测：` response` 输出 BPE 的 4256 而非 128822）。
  *
  * @module dsh-live-token-stats/tokenizer/bpe
  */
 
-import { MERGE_PAIRS, VOCAB_B64, VOCAB_SIZE } from './data.ts'
+import { ADDED_TOKENS, MERGE_PAIRS, VOCAB_B64, VOCAB_SIZE } from './data.ts'
 import { bytesToChars, charToBytes } from './bytes.ts'
 
 // --- pre_tokenizer 正则（与 tokenizer.json 逐字节一致，u flag 启用 \p{}） ---
@@ -73,6 +79,137 @@ export function preTokenize(text: string): PreToken[] {
       }
     }
   }
+  return out
+}
+
+// --- added tokens：trie 最长前缀匹配（按码点），命中且 special=true 直接出 id ---
+interface AddedNode {
+  next: Map<string, AddedNode>
+  id?: number
+  special: boolean
+}
+
+let addedTrie: AddedNode | undefined
+
+function getAddedTrie(): AddedNode {
+  if (addedTrie !== undefined) return addedTrie
+  const root: AddedNode = { next: new Map(), special: false }
+  for (const t of ADDED_TOKENS) {
+    if (t.content.length === 0) continue // 空内容永不匹配文本
+    let node = root
+    for (const ch of t.content) {
+      let nxt = node.next.get(ch)
+      if (nxt === undefined) {
+        nxt = { next: new Map(), special: false }
+        node.next.set(ch, nxt)
+      }
+      node = nxt
+    }
+    node.id = t.id
+    node.special = t.special
+  }
+  addedTrie = root
+  return root
+}
+
+/** 所有 added token 的首码点集合（潜在窗口起点判定用）。 */
+const addedFirstChars: Set<string> = (() => {
+  const s = new Set<string>()
+  for (const t of ADDED_TOKENS) {
+    const a = Array.from(t.content)
+    if (a.length > 0) s.add(a[0])
+  }
+  return s
+})()
+
+/**
+ * 找潜在窗口起点：从 combined 末尾开始，能构成某个 added token 最长前缀的最靠左起点。
+ * 该位置之后的文本可能被后续帧补全成完整 added 匹配，增量切分必须将其整体保留在不结算窗口中。
+ * 该位置之前的文本不可能是任何完整匹配的起点，可安全按普通文本结算。
+ *
+ * 与旧实现的差异：旧实现只要在文本里遇到任意一个 added 首码点就把整段锁死，导致尖括号与全角竖线一出现就永久卡住，复杂度退化为平方。
+ * 这里仅在文本末尾确实处于某 added 前缀匹配中时才锁窗，前缀一旦因后续字符不匹配而中断，窗口立即关闭，后续文本照常结算。
+ *
+ * 无匹配时返回 combined 长度，表示整个文本没有未闭合前缀，可按普通文本结算。
+ */
+export function potentialWindowStart(cps: string[]): number {
+  const trie = getAddedTrie()
+  // 从末尾向前找，检查每个 added 首码点为起点的最长前缀是否延伸到文本末尾。
+  // 只需看末尾最长 added token 长度内的区间，更早的位置要么已完整匹配要么已确认中断，不可能是未闭合前缀。
+  const maxLen = 36 // ADDED_TOKENS 最长 36 码点，见 data.ts 生成注释
+  const lo = Math.max(0, cps.length - maxLen)
+  for (let i = lo; i < cps.length; i += 1) {
+    // 起点必须落在某 added 首码点上，否则不可能是前缀起点
+    if (!addedFirstChars.has(cps[i])) continue
+    let node = trie
+    let j = i
+    let reachedEnd = true
+    // 沿 trie 走最长前缀，中途字符不匹配说明前缀已断开
+    for (; j < cps.length; j += 1) {
+      const nxt = node.next.get(cps[j])
+      if (nxt === undefined) { reachedEnd = false; break }
+      node = nxt
+    }
+    // 某前缀延伸或将要延伸到文本末尾时，认定为潜在窗口
+    if (reachedEnd) return i
+  }
+  return cps.length
+}
+
+/** 在 cps 的 pos 处找最长 added token 前缀，命中返回长度与 token 信息，否则返回 null。 */
+function matchAddedAt(
+  cps: string[],
+  pos: number,
+  trie: AddedNode,
+): { len: number; id: number; special: boolean } | null {
+  let node = trie
+  let best: { len: number; id: number; special: boolean } | null = null
+  let len = 0
+  for (let i = pos; i < cps.length; i += 1) {
+    const nxt = node.next.get(cps[i])
+    if (nxt === undefined) break
+    node = nxt
+    len += 1
+    if (node.id !== undefined) best = { len, id: node.id, special: node.special }
+  }
+  return best
+}
+
+/** 分段结果：bpe 段（普通文本，需按 merges 合并）或 added 段（special token 单 id）。 */
+export type TokenSegment =
+  | { kind: 'bpe'; text: string; codes: number[] }
+  | { kind: 'added'; text: string; id: number }
+
+/**
+ * 先做 added token 最长前缀匹配再分段：命中且 special=true 的 token 作为独立
+ * added 段（直接输出其 id）；其余文本正常走 pre-tokenize 成 bpe 段。
+ * non-special 命中与普通文本等价（transformers 对它递归 tokenize，已实测逐 id 一致）。
+ * 返回的段序列按原文顺序交替，空输入返回空数组。
+ */
+export function splitWithAdded(text: string): TokenSegment[] {
+  const out: TokenSegment[] = []
+  if (text.length === 0) return out
+  const cps = Array.from(text)
+  const trie = getAddedTrie()
+  let i = 0
+  let segStart = 0
+  const flushBpe = (from: number, to: number): void => {
+    for (const pt of preTokenize(cps.slice(from, to).join(''))) {
+      out.push({ kind: 'bpe', text: pt.text, codes: pt.codes })
+    }
+  }
+  while (i < cps.length) {
+    const m = matchAddedAt(cps, i, trie)
+    if (m !== null && m.special) {
+      flushBpe(segStart, i)
+      out.push({ kind: 'added', text: cps.slice(i, i + m.len).join(''), id: m.id })
+      i += m.len
+      segStart = i
+    } else {
+      i += 1
+    }
+  }
+  flushBpe(segStart, cps.length)
   return out
 }
 
@@ -148,13 +285,17 @@ export function bpeMerge(codes: number[]): number[] {
 }
 
 /**
- * 完整切分一段文本，返回 token id 序列（与 transformers encode 对齐；
- * 不处理 added_tokens 的内容匹配——普通模型输出不含特殊 token）。
+ * 完整切分一段文本，返回 token id 序列（与 transformers encode 对齐：
+ * special added token 直接输出其 id，其余文本正常 BPE）。
  */
 export function encodeText(text: string): number[] {
   const ids: number[] = []
-  for (const seg of preTokenize(text)) {
-    ids.push(...bpeMerge(seg.codes))
+  for (const seg of splitWithAdded(text)) {
+    if (seg.kind === 'added') {
+      ids.push(seg.id)
+    } else {
+      ids.push(...bpeMerge(seg.codes))
+    }
   }
   return ids
 }

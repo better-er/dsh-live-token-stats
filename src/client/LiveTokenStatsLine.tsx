@@ -91,13 +91,17 @@ function useWaitingTick(activeStartTime: number | null): void {
  * Live-rate + stall pull: ~10 Hz RPC poll of the host `/dsh-live-token-stats`
  * channel for this session. The host computes the rate as of each poll, so
  * the values keep moving while the stream stalls without any local ticking.
+ * 仅在有活跃 step 时轮询（enabled）；空闲时不发任何请求，避免空转流量。
  */
 function useLiveSnapshot(
   rpc: LiveTokenStatsLineInjected['rpc'],
   sessionId: string,
+  enabled: boolean,
 ): { rate: number | undefined; stallMs: number } {
   const [live, setLive] = useState<{ rate: number | undefined; stallMs: number }>({ rate: undefined, stallMs: 0 })
   useEffect(() => {
+    // 空闲态（无活跃 step）下停掉轮询；进入活跃态时 effect 重建并立即拉一次。
+    if (!enabled) return
     let disposed = false
     let timer: ReturnType<typeof setInterval> | undefined
     const poll = async (): Promise<void> => {
@@ -127,7 +131,7 @@ function useLiveSnapshot(
       disposed = true
       if (timer !== undefined) clearInterval(timer)
     }
-  }, [rpc, sessionId])
+  }, [rpc, sessionId, enabled])
   return live
 }
 
@@ -140,7 +144,7 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
   const live = useProjection('liveTokenStats') as LiveTokenStatsProjection | undefined
   const active = live?.active ?? null
   const lastSettled = live?.lastSettled ?? null
-  const liveSnap = useLiveSnapshot(rpc, sessionId)
+  const liveSnap = useLiveSnapshot(rpc, sessionId, active !== null)
   const liveRate = liveSnap.rate
   const stallMs = liveSnap.stallMs
 

@@ -1,12 +1,13 @@
 /**
- * tokenizer 模块单测：黄金对照（transformers 逐 token id）+ 增量一致性 + 模块行为。
+ * tokenizer 模块单测：黄金对照（transformers 逐 token id，含 added tokens 特殊
+ * 匹配用例）+ 增量一致性 + 模块行为。
  *
  * 黄金数据由 deepseek_v3_tokenizer/scripts/export_fixtures.py 生成
  * （基于 DeepSeek V4-Flash tokenizer，词表与 V3 逐字节相同）。
  */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { bpeMerge, encodeText, preTokenize, tokenCount } from '../src/tokenizer/bpe.ts'
+import { bpeMerge, encodeText, preTokenize, splitWithAdded, tokenCount } from '../src/tokenizer/bpe.ts'
 import { BYTE_MAP_SIZE } from '../src/tokenizer/bytes.ts'
 import { EMPTY_INCREMENTAL, incrementalFeed, incrementalTotal } from '../src/tokenizer/incremental.ts'
 
@@ -58,6 +59,46 @@ describe('bpeMerge', () => {
   it('中文多字 token 存在（习近平新时代中国特色社会主义思想 一词）', () => {
     const ids = encodeText('习近平新时代中国特色社会主义思想')
     expect(ids.length).toBe(1)
+  })
+})
+
+describe('splitWithAdded 分段', () => {
+  const PH0 = '\u003c\uff5cplace\u2581holder\u2581no\u25810\uff5c\u003e' // 全角占位符（与 data 内容一致）
+
+  it('special 全角占位符成为独立段', () => {
+    const segs = splitWithAdded(`${PH0}测试`)
+    expect(segs.map((s) => s.kind)).toEqual(['added', 'bpe'])
+    expect(segs[0]).toMatchObject({ kind: 'added', id: 128000 })
+  })
+
+  it('占位符后接空格+中文拆成独立 bpe 段（空格与中文在 pre-tokenizer 下分开）', () => {
+    const segs = splitWithAdded(`${PH0} 测试`)
+    expect(segs.map((s) => s.kind)).toEqual(['added', 'bpe', 'bpe'])
+    expect(encodeText(`${PH0} 测试`)).toEqual([128000, 223, 10251])
+  })
+
+  it('占位符在不同位置均成段（前/中/后）', () => {
+    const segs = splitWithAdded(`先${PH0}后`)
+    expect(segs.map((s) => s.kind)).toEqual(['bpe', 'added', 'bpe'])
+    expect(segs[1]).toMatchObject({ kind: 'added', id: 128000 })
+  })
+
+  it('半角写法不匹配（内容是全角变体）', () => {
+    const segs = splitWithAdded('<|placeholder_no_0|> 测试')
+    expect(segs.every((s) => s.kind === 'bpe')).toBe(true)
+  })
+
+  it('非特殊 added token（response）命中后仍按 bpe 段处理', () => {
+    const segs = splitWithAdded(' response')
+    expect(segs.map((s) => s.kind)).toEqual(['bpe'])
+    expect(encodeText(' response')).toEqual([4256]) // BPE 的 Ġresponse，非 128822
+  })
+
+  it('相邻占位符连续出现各成一段', () => {
+    const segs = splitWithAdded(`${PH0}${PH0}`)
+    expect(segs).toHaveLength(2)
+    expect(segs[0]).toMatchObject({ kind: 'added', id: 128000 })
+    expect(segs[1]).toMatchObject({ kind: 'added', id: 128000 })
   })
 })
 

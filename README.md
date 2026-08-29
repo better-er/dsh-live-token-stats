@@ -11,6 +11,7 @@ DeepSeek Harness 经常会看起来像卡住了，只显示**深度潜水中**�
 ## 功能
 
 - **估算算法**：默认 `bpe` 模式将流式文本的每个 delta 增量喂入字节级 BPE 切分器，本地内置 DeepSeek V4 词表；跨 delta 维护未完成尾段，计数与整段一次性切分逐 token 一致，并已用 transformers 逐 token id 黄金对照验证。可选 `density` 双密度回退，按字符类别分别折算，配置见下方。
+- **added tokens 对齐**：内置完整 added tokens 元数据，与官方 tokenizer.json 逐项一致，编码时按最长前缀匹配；仅特殊 token 直接输出其 id，其余命中与 BPE 处理等价，与 transformers 逐 id 对齐，已实测对照。
 - **偏差对账与系统误差**：输出 token 估算与官方 usage 双字段并列，结算后由 usage 校准，偏差如实显示。工具调用因官方额外计费消息模板与调用 id，本地估算会低于实际值——实测单工具约 +40~60 token、双工具约 +70~80 token；纯文本与推理输出偏差约 1~2 token。
 
 ## 它长什么样
