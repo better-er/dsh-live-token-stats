@@ -93,7 +93,7 @@ dsh plugin --profile web remove dsh-live-token-stats
 
 - 仓库托管于 GitHub，主分支 `master`。所有改动经 **PR** 合入 `master`，`master` 建议开启分支保护，拒绝直接 push 与 force push。
 - **CI**：`.github/workflows/ci.yml` 在 `master` 的 push 与所有 PR 上自动执行 `typecheck → test → build`，全绿是合并门槛。
-- **CD**：`.github/workflows/release.yml` 在推送 `vX.Y.Z` tag 如 `v0.3.0` 时自动发布——校验版本号一致后构建、发布到 npm、并生成 GitHub Release 草稿人工确认。npm 发布需先配置仓库 `NPM_TOKEN` secret。
+- **CD**：`.github/workflows/release.yml` 在推送 `vX.Y.Z` tag 如 `v0.3.0` 时自动发布——凭 tag 号更新 `package.json` 版本并回写 master、构建、发布到 npm、并生成 GitHub Release 草稿人工确认。npm 发布需先配置仓库 `NPM_TOKEN` secret。
 - 具体分支、提交、PR 约定见 [CONTRIBUTING.md](./CONTRIBUTING.md) 与 PR 模板。
 
 ## License

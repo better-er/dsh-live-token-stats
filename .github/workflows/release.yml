@@ -1,15 +1,15 @@
 name: Release
 
-# 推送形如 vX.Y.Z 如 v0.3.0 的 tag 时触发自动发布：
-#   校验版本号一致 → 构建 → 发布 npm → 生成 GitHub Release draft。
-# 与仓库「bump v0.x.x」的手动发版节奏保持一致，不打 tag 不做任何发布。
+# 推送形如 vX.Y.Z 如 v0.3.0 的 tag 时自动发版：
+#   凭 tag 号更新 package.json 版本并提交回 master → 测试 → 构建 → 发布 npm
+#   → 生成 GitHub Release draft。人只需打一个 tag，其余自动衔接。
 # 注意：npm 发布依赖仓库设置的 Secrets → NPM_TOKEN，未配置时发布步骤会失败。
 on:
   push:
     tags:
       - 'v*'
 
-# 只读代码 + 可写 Release 用于创建草稿；发布 npm 用 token，不需要 id-token。
+# 读代码 + 写 master 以回写版本号 + 写 Release 用于创建草稿；npm 用 token 发布。
 permissions:
   contents: write
 
@@ -26,6 +26,38 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # 回写 master 需要完整历史，故拉全量。
+          fetch-depth: 0
+          # 默认 GITHUB_TOKEN 在分支保护下会被拒，此处显式传 token。
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      # 版本号仅凭 tag 号决定，写入 package.json 并提交回 master。
+      - name: Sync version to master
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"          # 去 v 前缀得版本号，如 0.3.0
+          echo "target version = $TAG"
+
+          # 切到 master 分支再改版本，避免在 detached tag 上提交。
+          git checkout master
+          git config user.name  github-actions[bot]
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 用临时文件改写 version 字段，保留其余内容不变。
+          node -e "
+            const fs = require('fs');
+            const p = require('./package.json');
+            p.version = process.argv[1];
+            fs.writeFileSync('./package.json', JSON.stringify(p, null, 2) + '\n');
+          " "$TAG"
+
+          # 已是最新版本则无改动，跳过提交；否则提交并推回 master。
+          git diff --quiet package.json || {
+            git add package.json
+            git commit -m "chore: release $TAG 同步 package.json 版本 [skip ci]"
+            git push origin master
+          }
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
@@ -42,17 +74,6 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      # 防呆：tag 与 package.json 版本不一致直接中止，避免发错号。
-      - name: Verify tag matches package.json version
-        run: |
-          TAG="${GITHUB_REF_NAME#v}"
-          PKG="$(node -p "require('./package.json').version")"
-          echo "tag version = $TAG ; package.json version = $PKG"
-          if [ "$TAG" != "$PKG" ]; then
-            echo "::error:: tag($TAG) 与 package.json($PKG) 版本不一致，已中止发布"
-            exit 1
-          fi
 
       - name: Test
         run: pnpm test

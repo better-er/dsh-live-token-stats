@@ -52,12 +52,12 @@ pnpm build       # 构建产物到 lib/，tsdown
 
 ## 版本与发布 CD
 
-- 版本号手动在 `package.json` 中 bump，保持仓库现有「bump v0.x.x」风格，不引入自动版本工具。
-- **发布 = 打 tag**：推送形如 `v0.3.0` 的 tag 后，`release.yml` 自动执行：
-  1. 校验 tag 版本与 `package.json` 一致，不一致直接失败；
+- **发布 = 打 tag**：推送形如 `v0.3.0` 的 tag 即自动发版，不再需要手动改版本号。`release.yml` 自动执行：
+  1. 凭 tag 号把 `package.json` 版本更新为对应值，并提交回 `master`；
   2. 测试加构建；
   3. 发布到 npm，需仓库已配置 `Secrets → NPM_TOKEN`；
   4. 生成 GitHub Release **草稿**，人工确认后正式公布。
+- 人只负责决定发哪个版本并打对应 tag。注意需先在 `master` 合入待发代码，再打 tag，否则发布的是旧代码。
 
 ## 注意事项
 
