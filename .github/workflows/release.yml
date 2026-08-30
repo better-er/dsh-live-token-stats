@@ -9,12 +9,6 @@ on:
     tags:
       - 'v*'
 
-# 读代码 + 写 master 以回写版本号 + 写 Release 用于创建草稿。
-# id-token: write 供 Trusted Publishing 换取 npm 临时凭证，无需 NPM_TOKEN。
-permissions:
-  contents: write
-  id-token: write
-
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
@@ -23,8 +17,16 @@ jobs:
   release:
     name: Publish ${{ github.ref_name }} to npm
     runs-on: ubuntu-latest
+    # id-token: write 供 Trusted Publishing 换取 npm 临时凭证，无需 NPM_TOKEN。
+    # 必须放在 job 级，GitHub 才会向该 job 注入 ACTIONS_ID_TOKEN_REQUEST_*。
+    permissions:
+      contents: write
+      id-token: write
     # fork 永不触发 tag 发布，仅作为兜底防护。
     if: startsWith(github.ref, 'refs/tags/v')
+    # 绑定 GitHub Actions environment「release」，使 OIDC subject 稳定为
+    # environment:release，npm 侧 Trusted Publisher 需填相同 Environment 名。
+    environment: release
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -66,11 +68,15 @@ jobs:
         with:
           version: 9
 
+      # setup-node 的 registry-url 告知 npm 向哪个 registry 换 Trusted Publishing 临时凭证。
+      # node-version 必须 >= 24，使捆绑的 npm >= 11.5.1（npm 官方 Trusted publishing 硬性要求；
+      # 低于该版本 npm CLI 无法做 OIDC 自动换权，会回退用失效 token 导致 PUT 404 is not in registry）。
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: pnpm
+          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -83,6 +89,7 @@ jobs:
 
       # Trusted Publishing：npm 凭 workflow 的 OIDC 身份直接授权，
       # 无需 NPM_TOKEN；--provenance 会在 npm 上附构建来源证明。
+      # node-version 24 保证捆绑 npm>=11.5.1，npm CLI 才能做 OIDC 自动换权发布。
       - name: Publish to npm
         run: npm publish --provenance --access public
 
