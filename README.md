@@ -46,11 +46,19 @@ DeepSeek Harness 经常会看起来像卡住了，只显示**深度潜水中**�
 
 ## 安装
 
+**从 GitHub 安装**：源码在 `src/`，`lib/` 不入仓库，安装时 npm 会触发 `prepare` 脚本现场构建。
+
+```powershell
+dsh plugin --profile web add github:better-er/dsh-live-token-stats
+```
+
+**从 npm 安装**：包内已含构建产物 `lib/index.js` 与 `lib/client.js`，安装时不再构建。
+
 ```powershell
 dsh plugin --profile web add dsh-live-token-stats
 ```
 
-一条命令装完即生效，自动挂载，重启 DSH web 后启用，无需手工编辑任何文件。实时行出现在 composer 卡片下方的状态带，与官方统计行并列。npm 包内已含构建产物，安装时不触发任何构建脚本授权。想从 GitHub 安装也可以，`dsh plugin --profile web add github:better-er/dsh-live-token-stats`，首装需按提示授权构建脚本。
+两种方式装完都会自动挂载，重启 DSH web 后启用，无需手工编辑任何文件。
 
 ## 卸载
 
