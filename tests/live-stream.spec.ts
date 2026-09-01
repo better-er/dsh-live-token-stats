@@ -129,6 +129,29 @@ describe('LiveTokenRateTracker', () => {
     expect(snap.stallMs).toBe(3800)
   })
 
+  it('流结束后不再累加进行中的停顿，stallMs 冻结', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    t.beginStep(SESSION, 1000)
+    t.fold(SESSION, tenTokenFrame(), 1200)
+    t.fold(SESSION, tenTokenFrame(), 3000) // gap 1800 ≥ 300 → stallMs = 1800
+    t.endStep(SESSION)
+    // 流结束后 idle 远超阈值，也不再累加，模拟 LLM 结束、工具执行期间的空闲。
+    expect(t.snapshot(SESSION, 3900).stallMs).toBe(1800)
+    expect(t.snapshot(SESSION, 8000).stallMs).toBe(1800)
+  })
+
+  it('流结束后再次 beginStep 会重置停顿状态', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    t.beginStep(SESSION, 1000)
+    t.fold(SESSION, tenTokenFrame(), 1200)
+    t.fold(SESSION, tenTokenFrame(), 3000) // gap 1800 → stallMs = 1800
+    t.endStep(SESSION)
+    // 新一轮 llm/stream 即工具循环重新开始计时，停顿与 ended 一并重置。
+    t.beginStep(SESSION, 10000)
+    t.fold(SESSION, tenTokenFrame(), 10200)
+    expect(t.snapshot(SESSION, 10200).stallMs).toBe(0)
+  })
+
   it('正常 delta 间距不计为停顿', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.beginStep(SESSION, 1000)

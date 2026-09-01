@@ -127,6 +127,8 @@ interface RateCell {
   stallMs: number
   /** 最近一次有 token 样本的时刻，0 表示本 step 尚无样本，用于算进行中的停顿。 */
   lastSampleAt: number
+  /** 本 step 的 llm/stream 是否已结束，结束后不再累加进行中的停顿。 */
+  ended: boolean
   /** 该会话的 BPE 增量切分状态，density 模式保持初始态。 */
   inc: IncrementalState
   /** tool-call 参数反转义的悬空尾部，跨帧维护于 cell.esc。 */
@@ -145,7 +147,7 @@ export interface LiveTokenSnapshot {
   tokensPerSecond?: number
   /** 最新折叠样本的墙钟 epoch 毫秒，客户端从这里开始衰减。 */
   updatedAt: number
-  /** 累计停顿毫秒，含进行中的当前停顿，间隔达 STALL_GRACE_MS 才计。 */
+  /** 累计停顿毫秒，含生成中正在进行的当前停顿，间隔达 STALL_GRACE_MS 才计；流结束后冻结，不再累加工具执行等非生成时间。 */
   stallMs: number
   /** 距上一次 delta 样本的毫秒数，0 表示刚有数据，用于观察当前卡了多久。 */
   sinceLastMs: number
@@ -157,6 +159,7 @@ const INITIAL_RATE_CELL = (): RateCell => ({
   stepStartAt: 0,
   stallMs: 0,
   lastSampleAt: 0,
+  ended: false,
   inc: { ...EMPTY_INCREMENTAL },
   esc: { ...EMPTY_UNESCAPE },
   nameCountedIds: new Set<string>(),
@@ -239,9 +242,20 @@ export class LiveTokenRateTracker {
     cell.stepStartAt = startAt
     cell.stallMs = 0
     cell.lastSampleAt = 0
+    cell.ended = false
     cell.inc = { ...EMPTY_INCREMENTAL }
     cell.esc = { ...EMPTY_UNESCAPE }
     cell.nameCountedIds = new Set<string>()
+  }
+
+  /**
+   * 标记本 step 的 llm/stream 已结束。
+   * 生成结束后浏览器仍在轮询，若保持「生成中」状态会把工具执行等非生成时间误计入进行中的停顿，
+   * 因此流结束后 `snapshot` 冻结累计停顿，不再累加 idle 时间。
+   */
+  endStep(sessionId: string): void {
+    const cell = this.cells.get(sessionId)
+    if (cell !== undefined) cell.ended = true
   }
 
   /**
@@ -253,7 +267,8 @@ export class LiveTokenRateTracker {
     const cell = this.cells.get(sessionId)
     if (cell === undefined) return { updatedAt: 0, stallMs: 0, sinceLastMs: 0 }
     const idleMs = cell.lastSampleAt > 0 ? Math.max(0, asOf - cell.lastSampleAt) : 0
-    const stallMs = cell.stallMs + (idleMs >= STALL_GRACE_MS ? idleMs : 0)
+    // 流结束后即工具执行等非生成时间，不再累加进行中的停顿，只保留生成期内已累计的部分。
+    const stallMs = cell.stallMs + (!cell.ended && idleMs >= STALL_GRACE_MS ? idleMs : 0)
     // 超窗样本逐批滑出窗口，长停顿后窗口内不再有样本。
     const window = this.spec.rateWindowMs
     const cutoff = asOf - window
@@ -412,6 +427,8 @@ export function installHostLiveStream(
             mode: spec.tokenizerMode,
           })
         }
+        // 流结束：标记本 step 生成完毕，之后浏览器轮询得到的空闲时间不再计入「已停顿」。
+        tracker.endStep(String(sessionId))
       })()
     },
     { global: true, prepend: true },

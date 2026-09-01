@@ -60,12 +60,17 @@ export function formatDuration(ms: number): string {
   return `${Math.floor(whole / 60)}m${whole % 60}s`
 }
 
-/** 估算减实际的带符号整数百分比，如 "+12%"。 */
+/** 估算减实际的带符号整数百分比，如 "+12%"。精确相等显示 "±0%"，四舍五入为 0 但仍有方向时保留正负向的 "+0%" / "-0%"。 */
 export function formatGapPct(estimated: number, actual: number): string {
   if (typeof estimated !== 'number' || typeof actual !== 'number' || !Number.isFinite(estimated) || !Number.isFinite(actual) || actual <= 0) return ''
   const pct = ((estimated - actual) / actual) * 100
+  const rounded = Math.round(pct)
+  if (rounded === 0) {
+    if (estimated === actual) return '±0%'
+    return pct >= 0 ? '+0%' : '-0%'
+  }
   const sign = pct >= 0 ? '+' : ''
-  return `${sign}${Math.round(pct)}%`
+  return `${sign}${rounded}%`
 }
 
 /** 重渲染计时：活跃步骤等待首字期间每秒 10 次。 */
