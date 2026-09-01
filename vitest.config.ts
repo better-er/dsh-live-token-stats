@@ -3,8 +3,7 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
   plugins: [tsconfigPaths()],
-  // Official SDK packages ship sourcemaps not published with the npm dist;
-  // do not try to load them during transform.
+  // 官方 SDK 包的 sourcemap 未随 npm 发行包提供，转换阶段不尝试加载。
   server: {
     sourcemapIgnoreList: () => true,
   },
@@ -12,10 +11,9 @@ export default defineConfig({
     include: ['tests/**/*.spec.ts'],
     pool: 'threads',
     environment: 'node',
-    // CI 用 Node 22 跑超长 BPE 对照用例约 7s，会超 vitest 默认 5000ms；
-    // 抬高全局超时避免慢机器上误报超时。
+    // CI 用 Node 22 跑超长 BPE 对照用例约 7s，会超 vitest 默认 5000ms；抬高全局超时避免慢机器上误报超时。
     testTimeout: 15_000,
-    // Keep the SDK packages inline-transformed instead of node-externalized.
+    // 将 SDK 包内联转换而非 node-externalized。
     server: {
       deps: {
         inline: [/@deepseek-ai\//],

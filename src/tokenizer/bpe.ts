@@ -52,8 +52,7 @@ export interface PreToken {
 
 /**
  * pre_tokenizer：依次应用三条 split 加 ByteLevel，返回段列表。
- * 段长不限——v0.3 起 bpeMerge 用 O(n log n) 堆实现，可安全处理任意长度段，
- * 不再需要 MAX_SEG_CODES 截断，截断反而会损失跨边界合并并引入误差。
+ * 段长不限——v0.3 起 bpeMerge 用 O(n log n) 堆实现，可安全处理任意长度段，不再需要 MAX_SEG_CODES 截断，截断反而会损失跨边界合并并引入误差。
  */
 export function preTokenize(text: string): PreToken[] {
   const segs = splitKeep(text, RE_DIGITS)
@@ -234,8 +233,7 @@ function getVocabMap(): Map<string, number> {
  * 对一段码位数组做 BPE 合并，返回 token id 列表。
  *
  * O(n log n) 堆实现 v0.3：最小堆按 rank，配邻接双链表与惰性删除。
- * 与朴素全扫版语义逐 id 一致：merges rank 全局唯一=数组下标，每轮最小 pair 唯一，
- * 堆顶即朴素版全扫选中的同一个 pair，因此两个版本合并轨迹完全相同，可直接对拍。
+ * 与朴素全扫版语义逐 id 一致：merges rank 全局唯一=数组下标，每轮最小 pair 唯一，堆顶即朴素版全扫选中的同一个 pair，因此两个版本合并轨迹完全相同，可直接对拍。
  *
  * 正确性要点：
  *  - 惰性删除：合并后旧候选不主动删，弹出时校验 left 仍 live、right 存在且 live、实时 rank 与入堆时一致，不通过则丢弃重弹，避免 O(n) 的删除维护。
@@ -257,7 +255,7 @@ export function bpeMerge(codes: number[]): number[] {
       dead: false,
     })
   }
-  // pair 元素 {rank, left}；rank 为 (left, 其右邻) 的合并 rank，+∞ 表示无此合并
+  // pair 元素含 rank 与 left，rank 为 left 与其右邻的合并 rank，无穷表示无此合并
   const pairRank = (l: number): number => {
     const r = nodes[l].next
     if (r === -1) return Number.POSITIVE_INFINITY

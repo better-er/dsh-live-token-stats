@@ -1,4 +1,4 @@
-# 贡献指南 Contributing
+# 贡献指南
 
 感谢你愿意为 **dsh-live-token-stats** 贡献代码。本文约定仓库的开发、CI 与发布流程，请先读完再动手。
 
@@ -31,7 +31,7 @@ pnpm build       # 构建产物到 lib/，tsdown
 
 - 注释默认中文，代码风格与仓库现有源码保持一致，不要引入破坏一致性的格式化工具。
 - 依赖管理用 `pnpm add`，不要手动改 lock 或把 node_modules 提交。
-- 少用 try/catch，确需时 except 分支必须带可定位错误的日志。
+- 少用 try/catch，确需时 catch 分支必须带可定位错误的日志。
 
 ## 分支与提交
 
@@ -55,7 +55,7 @@ pnpm build       # 构建产物到 lib/，tsdown
 - **发布 = 打 tag**：推送形如 `v0.3.0` 的 tag 即自动发版，不再需要手动改版本号。`release.yml` 自动执行：
   1. 凭 tag 号把 `package.json` 版本更新为对应值，并提交回 `master`；
   2. 测试加构建；
-  3. 发布到 npm，走 Trusted Publishing：需先在 npm 包管理页把此仓库的 GitHub Actions 绑定到对应包（Enable trusted publishing → GitHub Actions → owner/仓库/branch），无需配置 NPM_TOKEN；
+  3. 发布到 npm，走 Trusted Publishing：需先在 npm 包管理页把此仓库的 GitHub Actions 绑定到对应包，即 Enable trusted publishing → GitHub Actions → owner/仓库/branch，无需配置 NPM_TOKEN；
   4. 生成 GitHub Release **草稿**，人工确认后正式公布。
 - 人只负责决定发哪个版本并打对应 tag。注意需先在 `master` 合入待发代码，再打 tag，否则发布的是旧代码。
 

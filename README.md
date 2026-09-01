@@ -40,7 +40,7 @@ DeepSeek Harness 经常会看起来像卡住了，只显示**深度潜水中**�
 
 ## 演示视频
 
-| 溺水检测插件演示（48 秒） |
+| 溺水检测插件演示 · 48 秒 |
 | :---: |
 | [![溺水检测插件演示](https://i1.hdslb.com/bfs/archive/ec710e862e2042ea78a14ca4ae0d31e430540138.jpg)](https://www.bilibili.com/video/BV1L7hj69EXr/) |
 
