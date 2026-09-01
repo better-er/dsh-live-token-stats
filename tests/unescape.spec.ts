@@ -2,7 +2,7 @@
  * 流式 JSON 反转义单元测试。
  *
  * 验证三件事：
- * 1. 常见转义（\n \r \t \" \\ \uXXXX）正确还原；
+ * 1. \n \r \t \" \\ \uXXXX 等常见转义正确还原；
  * 2. 跨帧拆分即悬空尾部与整段解码结果逐字符一致；
  * 3. 非法转义按原样保留、空帧与尾帧收敛。
  *
@@ -40,7 +40,7 @@ describe('unescapeFeed', () => {
     expect(r2.state.tail).toBe('')
   })
 
-  it('跨帧 \\u 补全（hex 分两帧到）', () => {
+  it('跨帧 \\u 补全，hex 分两帧到', () => {
     const r1 = unescapeFeed(EMPTY_UNESCAPE, '\\u4f')
     expect(r1.text).toBe('')
     expect(r1.state.tail).toBe('\\u4f')
@@ -55,7 +55,7 @@ describe('unescapeFeed', () => {
     expect(r.state.tail).toBe('')
   })
 
-  it('跨帧拆分与整段解码逐字符一致（含反斜杠歧义）', () => {
+  it('跨帧拆分与整段解码逐字符一致，含反斜杠歧义', () => {
     const whole = '{"path": "C:\\\\tmp\\\\a.json", "content": "第\\n二\\t行\\u4f60"}'
     const reference = unescapeAll(whole)
     // 逐帧逐个字符拆开喂，模拟流式细碎 fragment

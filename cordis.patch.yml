@@ -1,9 +1,7 @@
-# dsh-live-token-stats bundle patch: mount the real-time token-stats plugin.
+# dsh-live-token-stats 的 bundle 补丁：挂载实时 token 统计插件。
 #
-# Applied when this bundle appears in a profile's dsh.profile.bundles list.
-# The host half (package root) registers the `liveTokenStats` session
-# projection against the official sessionProjections registry; the browser
-# half (dsh.client) renders the live stream readout in the composer dock.
+# 该 bundle 出现在 profile 的 dsh.profile.bundles 列表时生效。
+# 主机半身向官方 sessionProjections 注册表登记 `liveTokenStats` 会话投影，浏览器半身渲染 composer 停靠区的实时流读数。
 
 - insert:
     - id: dsh-live-token-stats

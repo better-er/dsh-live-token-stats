@@ -31,7 +31,7 @@ function tenTokenFrame(): StreamChunk {
 const SESSION = 'session-1'
 
 describe('LiveTokenRateTracker', () => {
-  it('starts idle: no snapshot before any delta', () => {
+  it('初始空闲：无 delta 前无快照', () => {
     const t = new LiveTokenRateTracker(SPEC)
     const snap = t.snapshot(SESSION, 10000)
     expect(snap.tokensPerSecond).toBeUndefined()
@@ -39,14 +39,14 @@ describe('LiveTokenRateTracker', () => {
     expect(snap.stallMs).toBe(0)
   })
 
-  it('ignores non-delta chunks and empty deltas', () => {
+  it('忽略非 delta 块与空 delta', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.fold(SESSION, { type: 'block-start', index: 0, blockType: 'text' }, 1000)
     t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId(''), argumentsDelta: '' }, 1000)
     expect(t.snapshot(SESSION, 10000).tokensPerSecond).toBeUndefined()
   })
 
-  it('computes a sane rate for sparse text deltas', () => {
+  it('稀疏文本 delta 算出合理速率', () => {
     const t = new LiveTokenRateTracker(SPEC)
     // 1 秒内 100 token → 约 100 tok/s。
     for (let i = 0; i < 10; i += 1) {
@@ -58,7 +58,7 @@ describe('LiveTokenRateTracker', () => {
     expect(snap.updatedAt).toBeGreaterThan(0)
   })
 
-  it('does NOT explode on a huge same-timestamp tool-call argument delta (burst guard)', () => {
+  it('大同一时间戳工具参数 delta 不爆表，突发保护', () => {
     const t = new LiveTokenRateTracker(SPEC)
     // 一条 13.5k 字符的参数 delta 单帧到达，13554 × 0.3 ≈ 4066 token，50ms 下限兜底，速率有界，不会除零爆表。
     t.fold(SESSION, toolCallDelta('x'.repeat(13554)), 5000)
@@ -67,7 +67,7 @@ describe('LiveTokenRateTracker', () => {
     expect(snap.tokensPerSecond!).toBeLessThan(100000)
   })
 
-  it('expires samples outside the window', () => {
+  it('窗口外样本过期', () => {
     const t = new LiveTokenRateTracker(SPEC)
     // 老 burst 在 ~1s，共 10*99 ≈ 990 token，远超 3s 窗口。
     for (let i = 0; i < 10; i += 1) t.fold(SESSION, textDelta('a'.repeat(330)), 1000 + i)
@@ -78,7 +78,7 @@ describe('LiveTokenRateTracker', () => {
     expect(snap.tokensPerSecond!).toBeLessThan(1000)
   })
 
-  it('TTFT 随窗口滑动：分母 = min(流逝时间, 窗口)，等待首字期不外发速率', () => {
+  it('TTFT 随窗口滑动：分母取流逝时间与窗口的较小值，等待首字期不外发速率', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.beginStep(SESSION, 1000)
     // 等待首字期：尚无样本，数学上未定义，不发假 0。
@@ -86,7 +86,7 @@ describe('LiveTokenRateTracker', () => {
     // 首字 2700ms 到达，TTFT 1.7s；10 帧共 100 token。
     for (let i = 0; i < 10; i += 1) t.fold(SESSION, tenTokenFrame(), 2700 + i * 10)
     const snap = t.snapshot(SESSION, 2790)
-    // span = min(2790-1000, 3000) = 1790ms → 100/1.79 ≈ 55.9 tok/s。
+    // span 为 2790-1000 与 3000 的较小值 1790ms，100/1.79 ≈ 55.9 tok/s。
     expect(snap.tokensPerSecond!).toBeGreaterThan(40)
     expect(snap.tokensPerSecond!).toBeLessThan(70)
   })
@@ -97,7 +97,7 @@ describe('LiveTokenRateTracker', () => {
     // 4000..5200ms 每 100ms 一帧，共 13 帧 = 130 token。
     for (let i = 0; i < 13; i += 1) t.fold(SESSION, tenTokenFrame(), 4000 + i * 100)
     const snap = t.snapshot(SESSION, 6000)
-    // 分母 = min(5000, 3000) = 3000，窗口 3s 内全样本存活 → 130/3 ≈ 43.3 tok/s。
+    // 分母为 5000 与 3000 的较小值 3000，窗口 3s 内全样本存活，130/3 ≈ 43.3 tok/s。
     expect(snap.tokensPerSecond).toBeDefined()
     expect(snap.tokensPerSecond!).toBeCloseTo(130 / 3, 1)
     // 同一批样本，推进 1s 后分母仍封顶 3000，速率不变，验证定值语义。
@@ -129,7 +129,7 @@ describe('LiveTokenRateTracker', () => {
     expect(snap.stallMs).toBe(3800)
   })
 
-  it('normal delta spacing does not count as stall', () => {
+  it('正常 delta 间距不计为停顿', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.beginStep(SESSION, 1000)
     t.fold(SESSION, tenTokenFrame(), 1200)
@@ -151,7 +151,7 @@ describe('LiveTokenRateTracker', () => {
     expect(snap.tokensPerSecond).toBeUndefined()
   })
 
-  it('reset drops the session cell', () => {
+  it('reset 丢弃会话单元', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.fold(SESSION, textDelta('hello world'), 1000)
     expect(t.snapshot(SESSION, 1000).tokensPerSecond).toBeDefined()
@@ -159,14 +159,14 @@ describe('LiveTokenRateTracker', () => {
     expect(t.snapshot(SESSION, 1000).tokensPerSecond).toBeUndefined()
   })
 
-  it('is per-session isolated', () => {
+  it('各会话相互隔离', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.fold('s-a', textDelta('a'.repeat(330)), 1000)
     expect(t.snapshot('s-b', 1000).tokensPerSecond).toBeUndefined()
     expect(t.snapshot('s-a', 1000).tokensPerSecond).toBeDefined()
   })
 
-  it('folding a streamed arguments fragment count toward output like text', () => {
+  it('流式参数片段与文本一样计入输出', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.fold(SESSION, toolCallDelta('{"path": '), 1000)
     t.fold(SESSION, toolCallDelta('"C:\\\\tmp\\\\a.json", "content": "abc"'), 1100)
@@ -192,7 +192,29 @@ describe('LiveTokenRateTracker', () => {
     expect(snap.tokensPerSecond!).toBeGreaterThan(0)
   })
 
-  it('BPE 模式：工具参数按解码后内容计数（转义原文不再直接 BPE）', () => {
+  it('BPE 模式：同一调用每帧都带 name 时只计一次，不重复累加', () => {
+    const t = new LiveTokenRateTracker(BPE_SPEC)
+    // DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name，官方只按一次计费。
+    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write', argumentsDelta: '{"a":' }, 1000)
+    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write', argumentsDelta: '1}' }, 1100)
+    // 全部样本合计 = 解码后参数 token + 一次 name；若重复累加会多出 tokenCount('write')。
+    const snap = t.snapshot(SESSION, 1110)
+    expect(snap.tokensPerSecond).toBeDefined()
+    // 参数 + 一次 name 的总 token 数在 0.1s 内，速率应远小于重复累加情形。
+    const oneTimeTokens = 100
+    expect(snap.tokensPerSecond!).toBeLessThan(oneTimeTokens * 10)
+  })
+
+  it('BPE 模式：同轮多个同名调用各计一次 name', () => {
+    const t = new LiveTokenRateTracker(BPE_SPEC)
+    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write', argumentsDelta: '{"a":1}' }, 1000)
+    t.fold(SESSION, { type: 'tool-call-delta', index: 1, id: CallId('call-2'), name: 'write', argumentsDelta: '{"b":2}' }, 1100)
+    const snap = t.snapshot(SESSION, 1110)
+    expect(snap.tokensPerSecond).toBeDefined()
+    expect(snap.tokensPerSecond!).toBeGreaterThan(0)
+  })
+
+  it('BPE 模式：工具参数按解码后内容计数，转义原文不再直接 BPE', () => {
     const t = new LiveTokenRateTracker(BPE_SPEC)
     const frames = [
       '{"content": "a\\',

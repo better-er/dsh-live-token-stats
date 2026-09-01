@@ -1,5 +1,5 @@
 {
-  // Type-check only (tsc --noEmit). Bundling/emission is tsdown's job.
+  // 仅类型检查由 tsc --noEmit 负责，打包由 tsdown 负责。
   "compilerOptions": {
     "target": "ES2024",
     "module": "ESNext",

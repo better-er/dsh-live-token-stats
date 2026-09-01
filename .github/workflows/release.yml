@@ -3,7 +3,7 @@ name: Release
 # 推送形如 vX.Y.Z 如 v0.3.0 的 tag 时自动发版：
 #   凭 tag 号更新 package.json 版本并提交回 master → 测试 → 构建 → 发布 npm
 #   → 生成 GitHub Release draft。人只需打一个 tag，其余自动衔接。
-# 注意：npm 发布依赖仓库设置的 Secrets → NPM_TOKEN，未配置时发布步骤会失败。
+# 注意：npm 发布走 Trusted Publishing，无需 NPM_TOKEN；未在 npm 侧绑定信任关系时发布会失败。
 on:
   push:
     tags:
@@ -24,8 +24,7 @@ jobs:
       id-token: write
     # fork 永不触发 tag 发布，仅作为兜底防护。
     if: startsWith(github.ref, 'refs/tags/v')
-    # 绑定 GitHub Actions environment「release」，使 OIDC subject 稳定为
-    # environment:release，npm 侧 Trusted Publisher 需填相同 Environment 名。
+    # 绑定 GitHub Actions environment「release」，使 OIDC subject 稳定为 environment:release，npm 侧 Trusted Publisher 需填相同 Environment 名。
     environment: release
     steps:
       - name: Checkout
@@ -69,8 +68,7 @@ jobs:
           version: 9
 
       # setup-node 的 registry-url 告知 npm 向哪个 registry 换 Trusted Publishing 临时凭证。
-      # node-version 必须 >= 24，使捆绑的 npm >= 11.5.1（npm 官方 Trusted publishing 硬性要求；
-      # 低于该版本 npm CLI 无法做 OIDC 自动换权，会回退用失效 token 导致 PUT 404 is not in registry）。
+      # node-version 必须大于等于 24，捆绑的 npm 才大于等于 11.5.1，这是 npm 官方 Trusted Publishing 硬性要求；低于该版本 npm CLI 无法做 OIDC 自动换权，会回退用失效 token 导致 PUT 404 is not in registry。
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
@@ -87,8 +85,7 @@ jobs:
       - name: Build
         run: pnpm build
 
-      # Trusted Publishing：npm 凭 workflow 的 OIDC 身份直接授权，
-      # 无需 NPM_TOKEN；--provenance 会在 npm 上附构建来源证明。
+      # Trusted Publishing：npm 凭 workflow 的 OIDC 身份直接授权，无需 NPM_TOKEN；--provenance 会在 npm 上附构建来源证明。
       # node-version 24 保证捆绑 npm>=11.5.1，npm CLI 才能做 OIDC 自动换权发布。
       - name: Publish to npm
         run: npm publish --provenance --access public

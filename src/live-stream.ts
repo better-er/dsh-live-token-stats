@@ -36,14 +36,13 @@ import {
 import { EMPTY_UNESCAPE, unescapeFeed, type UnescapeState } from './tokenizer/unescape.ts'
 
 /**
- * 工具调用名的 token 数，由 tool-call-delta 首个片段一次性携带。
+ * 单个工具调用名的 token 数，BPE 或 density 按 spec 计价。
  * 官方将模型生成的 tool-call JSON 完整计入 output，name 字段同为模型生成，此处补上 argumentsDelta 之外的缺口。
+ * 注意：DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name 字段，官方只按一次计费，
+ * 调用方必须按工具调用 id 去重，仅在首次出现时计入，否则 name 会被重复累加。
  * 消息外壳与模板结构费不补偿，见 DESIGN §10.x。
  */
-function toolCallNameTokens(chunk: StreamChunk, spec: Readonly<EstimatorSpec>): number {
-  if (chunk.type !== 'tool-call-delta') return 0
-  const name = chunk.name
-  if (typeof name !== 'string' || name.length === 0) return 0
+function toolNameTokenCount(name: string, spec: Readonly<EstimatorSpec>): number {
   return spec.tokenizerMode === 'bpe' ? tokenCount(name) : estimateTextTokens(name, spec)
 }
 
@@ -132,13 +131,15 @@ interface RateCell {
   inc: IncrementalState
   /** tool-call 参数反转义的悬空尾部，跨帧维护于 cell.esc。 */
   esc: UnescapeState
+  /** 已计入 name token 的工具调用 id，同一调用跨帧只计一次。 */
+  nameCountedIds: Set<string>
 }
 
 /** 提供给客户端、针对某个会话的实时快照。 */
 export interface LiveTokenSnapshot {
   /**
    * 实时速度 tok/s：窗口内累计 token 除以跨度。
-   * 跨度 = min(自 step 开始流逝时间, 窗口定值)，即刚开始时含首字延迟随窗口滑动爬升，首字延迟摊完且流逝超过窗口后固定为窗口定值。
+   * 跨度取自 step 开始流逝时间与窗口定值的较小值，即刚开始时含首字延迟随窗口滑动爬升，首字延迟摊完且流逝超过窗口后固定为窗口定值。
    * 超窗无样本则无值。
    */
   tokensPerSecond?: number
@@ -158,6 +159,7 @@ const INITIAL_RATE_CELL = (): RateCell => ({
   lastSampleAt: 0,
   inc: { ...EMPTY_INCREMENTAL },
   esc: { ...EMPTY_UNESCAPE },
+  nameCountedIds: new Set<string>(),
 })
 
 /**
@@ -174,12 +176,23 @@ export class LiveTokenRateTracker {
     if (sessionId === undefined) return
     if (!isTokenDelta(chunk)) return
     const text = deltaTextOf(chunk)
-    const nameTokens = toolCallNameTokens(chunk, this.spec)
-    if (text.length === 0 && nameTokens === 0) return
+    // 工具名 token 每个调用只计一次：DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name，
+    // 逐帧累加会把 name 重复计数，按工具调用 id 去重，仅首次出现计入。
+    let nameTokens = 0
     let cell = this.cells.get(sessionId)
+    if (chunk.type === 'tool-call-delta') {
+      const id = chunk.id
+      const name = chunk.name
+      if (typeof name === 'string' && name.length > 0 && (cell === undefined || !cell.nameCountedIds.has(id))) {
+        nameTokens = toolNameTokenCount(name, this.spec)
+      }
+      if (nameTokens > 0 && cell !== undefined) cell.nameCountedIds.add(id)
+    }
+    if (text.length === 0 && nameTokens === 0) return
     if (cell === undefined) {
       cell = INITIAL_RATE_CELL()
       this.cells.set(sessionId, cell)
+      if (nameTokens > 0 && chunk.type === 'tool-call-delta') cell.nameCountedIds.add(chunk.id)
     }
     // 停顿累计：相邻 delta 间隔达到阈值才算「卡住」，整个间隔计入累计停顿。
     if (cell.lastSampleAt > 0 && timeMs - cell.lastSampleAt >= STALL_GRACE_MS) {
@@ -228,6 +241,7 @@ export class LiveTokenRateTracker {
     cell.lastSampleAt = 0
     cell.inc = { ...EMPTY_INCREMENTAL }
     cell.esc = { ...EMPTY_UNESCAPE }
+    cell.nameCountedIds = new Set<string>()
   }
 
   /**
@@ -249,7 +263,7 @@ export class LiveTokenRateTracker {
     cell.updatedAt = asOf
     let rate: number | undefined
     if (samples.length > 0) {
-      // 分母 = min(流逝时间, 窗口)，下限 50ms 防同批突发除零；未 beginStep 时回退旧口径。
+      // 分母取流逝时间与窗口的较小值，下限 50ms 防同批突发除零；未 beginStep 时回退旧口径。
       const elapsedMs = cell.stepStartAt > 0 ? Math.max(0, asOf - cell.stepStartAt) : asOf - samples[0].time
       const spanMs = Math.max(50, Math.min(elapsedMs, window))
       const total = samples.reduce((acc, s) => acc + s.tokens, 0)
@@ -326,8 +340,7 @@ export function installHostLiveStream(
           }
           : null
         for await (const chunk of next()) {
-          // timeMs：adapter 的 chunk 不带时间戳；用墙钟，让客户端渲染的速率
-          // 随真实时间自然衰减。
+          // timeMs：adapter 的 chunk 不带时间戳；用墙钟，让客户端渲染的速率随真实时间自然衰减。
           const now = Date.now()
           tracker.fold(String(sessionId), chunk, now)
           // —— 诊断统计，与 fold 同一数据源，独立切分一遍，仅 debug 开启时运行——

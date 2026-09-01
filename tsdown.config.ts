@@ -1,7 +1,6 @@
 import { defineConfig } from 'tsdown'
 
-// Platform modules the shell shares into the client module table; client
-// bundles must leave them external (resolved through the loader's require).
+// 客户端模块表中 shell 共享的平台模块打包时需保持 external 由 loader 的 require 解析。
 const CLIENT_EXTERNALS = [
   'react',
   'react/jsx-runtime',
@@ -15,7 +14,7 @@ const CLIENT_EXTERNALS = [
 const ID = 'dsh-live-token-stats'
 
 export default defineConfig([
-  // Host half: src/index.ts -> lib/index.js (ESM, node platform).
+  // 主机半身：src/index.ts 产出 lib/index.js，ESM 且 node 平台。
   {
     name: `${ID}/lib`,
     entry: { index: 'src/index.ts' },
@@ -23,18 +22,16 @@ export default defineConfig([
     format: 'esm',
     platform: 'node',
     target: 'es2024',
-    // Emit lib/index.js / lib/index.d.ts (not .mjs/.d.mts) so `main`/`types`
-    // resolve without extension churn.
+    // 产出 lib/index.js / lib/index.d.ts 非 mjs d.mts 使 main/types 解析无需处理扩展名。
     fixedExtension: false,
     dts: true,
     clean: false,
-    // Framework resolves at runtime from the dsh profile tree.
+    // 框架依赖在运行时由 dsh profile 树解析。
     deps: {
       neverBundle: [
         '@deepseek-ai/cordis',
         '@deepseek-ai/schemastery',
-        // Official runtime packages we only *call* (never bundle): the profile
-        // tree already installs them.
+        // 仅调用的官方运行时包不打入 bundle profile 树已安装。
         '@deepseek-ai/dsh-client-connection',
         '@deepseek-ai/dsh-host-apiproxy',
         '@deepseek-ai/dsh-llm',
@@ -43,7 +40,7 @@ export default defineConfig([
       ],
     },
   },
-  // Browser half: src/client/index.ts -> lib/client.js (ModuleLoader factory).
+  // 浏览器半身：src/client/index.ts 产出 lib/client.js，ModuleLoader 工厂。
   {
     name: `${ID}/client`,
     entry: { client: 'src/client/index.ts' },
@@ -55,8 +52,7 @@ export default defineConfig([
     clean: false,
     deps: {
       neverBundle: [...CLIENT_EXTERNALS],
-      // Anything not in the loader module table inlines into the bundle
-      // (here: only zod's view schema would inline, which is not used in client).
+      // 不在 loader 模块表中的内容打包进 bundle 此处仅 zod 的 view schema 会内联但客户端未使用。
       alwaysBundle: (id) => (CLIENT_EXTERNALS.includes(id) ? undefined : true),
     },
     define: {

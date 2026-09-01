@@ -76,6 +76,8 @@ export interface ActiveStepState {
   inc: IncrementalState
   /** tool-call 参数反转义状态，即跨 delta 帧的悬空尾部，纯 JSON 可重放。 */
   esc: UnescapeState
+  /** 已计入 name token 的工具调用 id，同一调用跨帧只计一次，纯 JSON 可重放。 */
+  nameCountedIds: string[]
 }
 
 /** delta 文本计数：bpe 走增量 BPE 切分，与官方口径一致，density 走双密度盲估。 */
@@ -123,14 +125,14 @@ function decodeToolArgument(
 }
 
 /**
- * 工具调用名的 token 数，由 tool-call-delta 首个片段一次性携带。
+ * 单个工具调用名的 token 数，BPE 或 density 按 spec 计价。
  * 官方会把模型生成的 tool-call JSON 完整计入 output，其中 `name` 字段是模型生成内容，本地可拿到。
- * `argumentsDelta` 已由 deltaText 计入，这里补上 name 缺口，消息外壳与模板结构费不补偿，见 DESIGN §10.x。
+ * 注意：DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name 字段，官方只按一次计费，
+ * 调用方必须按工具调用 id 去重，仅在首次出现时计入，否则 name 会被重复累加。
+ * 这里只负责算 name 本身，去重由调用方维护。
+ * `argumentsDelta` 已由 deltaText 计入，消息外壳与模板结构费不补偿，见 DESIGN §10.x。
  */
-function toolCallNameTokens(chunk: StreamChunk, spec: Readonly<EstimatorSpec>): number {
-  if (chunk.type !== 'tool-call-delta') return 0
-  const name = chunk.name
-  if (typeof name !== 'string' || name.length === 0) return 0
+function toolNameTokenCount(name: string, spec: Readonly<EstimatorSpec>): number {
   return spec.tokenizerMode === 'bpe' ? tokenCount(name) : estimateTextTokens(name, spec)
 }
 
@@ -139,6 +141,7 @@ const ACTIVE_INIT: ActiveStepState = {
   lastSettled: null,
   inc: { ...EMPTY_INCREMENTAL },
   esc: { ...EMPTY_UNESCAPE },
+  nameCountedIds: [],
 }
 
 /** 活跃步骤指标单元的纯折叠。 */
@@ -154,6 +157,7 @@ export function activeStepApply(
       ...state,
       inc: { ...EMPTY_INCREMENTAL },
       esc: { ...EMPTY_UNESCAPE },
+      nameCountedIds: [],
       active: {
         turn: data.turn,
         step: data.step,
@@ -182,7 +186,17 @@ export function activeStepApply(
     }
     if (!isDeltaChunk(chunk) || state.active.exact) return state
     const text = deltaText(chunk)
-    const nameTokens = toolCallNameTokens(chunk, spec)
+    // 工具名 token 每个调用只计一次：DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name，
+    // 逐帧累加会把 name 重复计数，按工具调用 id 去重，仅首次出现计入。
+    let nameTokens = 0
+    let nameCountedIds = state.nameCountedIds
+    if (chunk.type === 'tool-call-delta') {
+      const name = chunk.name
+      if (typeof name === 'string' && name.length > 0 && !nameCountedIds.includes(chunk.id)) {
+        nameTokens = toolNameTokenCount(name, spec)
+        nameCountedIds = [...nameCountedIds, chunk.id]
+      }
+    }
     if (text.length === 0 && nameTokens === 0) return state
     // 工具参数先反转义再计数，跨帧悬空尾部挂在 esc 状态上
     const esc = chunk.type === 'tool-call-delta' ? decodeToolArgument(text, state.esc) : undefined
@@ -192,6 +206,7 @@ export function activeStepApply(
     return {
       ...state,
       inc,
+      nameCountedIds,
       ...esc !== undefined ? { esc: esc.esc } : {},
       active: {
         ...state.active,
@@ -221,6 +236,7 @@ export function activeStepApply(
       return {
         inc: { ...EMPTY_INCREMENTAL },
         esc: { ...EMPTY_UNESCAPE },
+        nameCountedIds: [],
         active: null,
         lastSettled: {
           turn: data.turn,
@@ -239,7 +255,7 @@ export function activeStepApply(
 
   // 未完成的 turn/end 会废弃其未结算的估算。
   if (type === 'turn/end' && data.reason && data.reason.kind !== 'completed') {
-    return { ...state, inc: { ...EMPTY_INCREMENTAL }, esc: { ...EMPTY_UNESCAPE }, active: null }
+    return { ...state, inc: { ...EMPTY_INCREMENTAL }, esc: { ...EMPTY_UNESCAPE }, nameCountedIds: [], active: null }
   }
 
   return state
@@ -266,6 +282,8 @@ export interface ThroughputState {
   inc: IncrementalState
   /** tool-call 参数反转义状态，即跨 delta 帧的悬空尾部，纯 JSON 可重放。 */
   esc: UnescapeState
+  /** 已计入 name token 的工具调用 id，同一调用跨帧只计一次，纯 JSON 可重放。 */
+  nameCountedIds: string[]
 }
 
 const THROUGHPUT_INIT: ThroughputState = {
@@ -274,6 +292,7 @@ const THROUGHPUT_INIT: ThroughputState = {
   currentRate: undefined,
   inc: { ...EMPTY_INCREMENTAL },
   esc: { ...EMPTY_UNESCAPE },
+  nameCountedIds: [],
 }
 
 /** 在 `asOf` 时刻滑动窗口并重算实时速率，纯函数。 */
@@ -290,7 +309,7 @@ function slideWindow(state: ThroughputState, asOf: number, spec: Readonly<Estima
     const spanMs = Math.max(1, asOf - samples[0].time)
     currentRate = total / (spanMs / 1000)
   }
-  return { samples, totalTokens: total, currentRate, inc: state.inc, esc: state.esc }
+  return { samples, totalTokens: total, currentRate, inc: state.inc, esc: state.esc, nameCountedIds: state.nameCountedIds }
 }
 
 /** 吞吐指标单元的纯折叠。 */
@@ -302,7 +321,16 @@ export function throughputApply(
   if (event.type === 'assistant/chunk' && isDeltaChunk(event.data.chunk)) {
     const chunk = event.data.chunk
     const text = deltaText(chunk)
-    const nameTokens = toolCallNameTokens(chunk, spec)
+    // 工具名 token 每个调用只计一次，按工具调用 id 去重，与 activeStep 同口径。
+    let nameTokens = 0
+    let nameCountedIds = state.nameCountedIds
+    if (chunk.type === 'tool-call-delta') {
+      const name = chunk.name
+      if (typeof name === 'string' && name.length > 0 && !nameCountedIds.includes(chunk.id)) {
+        nameTokens = toolNameTokenCount(name, spec)
+        nameCountedIds = [...nameCountedIds, chunk.id]
+      }
+    }
     if (text.length === 0 && nameTokens === 0) return state
     // 工具参数先反转义再计数，跨帧悬空尾部挂在 esc 状态上
     const esc = chunk.type === 'tool-call-delta' ? decodeToolArgument(text, state.esc) : undefined
@@ -316,6 +344,7 @@ export function throughputApply(
         currentRate: state.currentRate,
         inc,
         esc: esc !== undefined ? esc.esc : state.esc,
+        nameCountedIds,
       },
       event.time,
       spec,
@@ -373,12 +402,15 @@ const throughputSampleSchema = z.object({
   tokens: z.number().nonnegative(),
 }).strict()
 
+const idListSchema = z.array(z.string())
+
 const throughputStateSchema = z.object({
   samples: z.array(throughputSampleSchema),
   totalTokens: z.number().nonnegative(),
   currentRate: z.number().nonnegative().optional(),
   inc: incSchema,
   esc: escSchema,
+  nameCountedIds: idListSchema,
 }).strict()
 
 const activeStepStateSchema = z.object({
@@ -386,6 +418,7 @@ const activeStepStateSchema = z.object({
   lastSettled: lastSettledSchema.nullable(),
   inc: incSchema,
   esc: escSchema,
+  nameCountedIds: idListSchema,
 }).strict()
 
 /** 在用它播种一次缓存恢复前校验持久化的折叠状态。 */
@@ -436,6 +469,7 @@ export function createLiveTokenStatsDefinition(
     },
     // 仅当序列化状态字段或折叠语义变化时才递增。
     // v4：tool-call 参数反转义，esc 状态——官方按解码后内容计费。
-    stateVersion: 4,
+    // v5：tool-call name 按调用 id 去重只计一次——DSH 的 llm/stream 对同一调用的每个 delta 帧都携带 name。
+    stateVersion: 5,
   }
 }
