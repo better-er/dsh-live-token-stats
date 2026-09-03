@@ -11,7 +11,7 @@
  *       准确速度 28.7 tok/s | 估算 2,123 / 实际 1,966 (+8%) | 首字延迟 2.3s
  *     还没有 token 到达，所以没有实时速度与输出可显示，保留上一次结算的读数作为对照基线。
  *     首字延迟从 step 开始以 10 Hz 实时跳动，首字落地瞬间冻结为该 step 的精确 TTFT，同时状态切到生成中。
- *   - 空闲、上一步已结算，同样的结算读数，但首字延迟是上一步的结算 TTFT，作为静态对照基线。
+ *   - 空闲、上一步已结算，同样的结算读数，但首字延迟是上一步的结算 TTFT，作为静态对照基线。生成已停止但 step 未结束时也显示此态。
  *
  * @module dsh-live-token-stats/client
  */
@@ -35,6 +35,8 @@ interface LiveRateSnapshot {
   updatedAt: number
   stallMs?: number
   sinceLastMs?: number
+  /** 该 step 的模型生成是否仍在进行；false 表示流已结束，进入工具执行等停止态。 */
+  generating?: boolean
 }
 
 // --- Formatting -------------------------------------------------------------
@@ -92,8 +94,8 @@ function useLiveSnapshot(
   rpc: LiveTokenStatsLineInjected['rpc'],
   sessionId: string,
   enabled: boolean,
-): { rate: number | undefined; stallMs: number } {
-  const [live, setLive] = useState<{ rate: number | undefined; stallMs: number }>({ rate: undefined, stallMs: 0 })
+): { rate: number | undefined; stallMs: number; generating: boolean } {
+  const [live, setLive] = useState<{ rate: number | undefined; stallMs: number; generating: boolean }>({ rate: undefined, stallMs: 0, generating: true })
   useEffect(() => {
     // 空闲态即无活跃 step 时停掉轮询；进入活跃态时 effect 重建并立即拉一次。
     if (!enabled) return
@@ -112,12 +114,13 @@ function useLiveSnapshot(
           setLive({
             rate: typeof data?.tokensPerSecond === 'number' ? data.tokensPerSecond : undefined,
             stallMs: data?.stallMs ?? 0,
+            generating: data?.generating ?? true,
           })
         } else {
-          setLive({ rate: undefined, stallMs: 0 })
+          setLive({ rate: undefined, stallMs: 0, generating: true })
         }
       } catch {
-        if (!disposed) setLive({ rate: undefined, stallMs: 0 })
+        if (!disposed) setLive({ rate: undefined, stallMs: 0, generating: true })
       }
     }
     void poll()
@@ -142,8 +145,9 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
   const liveSnap = useLiveSnapshot(rpc, sessionId, active !== null)
   const liveRate = liveSnap.rate
   const stallMs = liveSnap.stallMs
+  const generating = liveSnap.generating
 
-  const waiting = active !== null && active.firstTokenTime === null
+  const waiting = active !== null && active.firstTokenTime === null && generating
   useWaitingTick(waiting ? active.startTime : null)
 
   const groups: string[] = []
@@ -166,7 +170,7 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
     return out
   }
 
-  if (active !== null && active.firstTokenTime !== null) {
+  if (active !== null && active.firstTokenTime !== null && generating) {
     // 状态一：生成中，已出首字。停顿超窗无样本后速率格消失，只剩已停顿计时。
     if (liveRate !== undefined) groups.push(`实时速度 ~${formatTps(liveRate)} tok/s`)
     if (stallMs > 0) groups.push(`已停顿 ${formatDuration(stallMs)}`)
@@ -176,17 +180,25 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
     const elapsedMs = Date.now() - active.startTime
     if (elapsedMs > 0) groups.push(`平均速度 ~${formatTps(out / (elapsedMs / 1000))} tok/s`)
     groups.push(`首字延迟 ${formatDuration(active.firstTokenTime - active.startTime)}`)
-  } else if (active !== null && active.firstTokenTime === null) {
+  } else if (active !== null && active.firstTokenTime === null && generating) {
     // 状态二：等待首字，尚无 token，无实时速度与实时输出。结算读数保持为对照基线。
     // 首字延迟显示本次等待的实时耗时，由 useWaitingTick 以 10 Hz 驱动重渲染逐帧上涨，首字落地的瞬间自然定格为该 step 的精确 TTFT。
     groups.push(...settledGroups())
     groups.push(`首字延迟 ${formatDuration(Date.now() - active.startTime)}`)
   } else if (lastSettled !== null) {
-    // 状态三：空闲态，上次已结算
+    // 状态三：空闲态，上次已结算。生成已停止但 step 未结束，例如工具执行中，也落回此态。
     groups.push(...settledGroups())
     if (lastSettled.firstTokenTime !== null) {
       groups.push(`首字延迟 ${formatDuration(lastSettled.firstTokenTime - lastSettled.startTime)}`)
     }
+  } else if (active !== null && active.firstTokenTime !== null) {
+    // 状态三的兜底：流已停止、step 未结束，但尚无任何历史结算——正是第一步常见情形，
+    // 例如本 step 已推完文字、正在执行工具或等待结算。此时没有上一笔 lastSettled 可作对照基线，
+    // 改显示本 step 已累计的输出 token 与首字延迟，而不是误渲染「还没发起对话」的空态占位符。
+    // 第 2、3… 步因存在 lastSettled 会命中状态三，不会走到这里。
+    const out = active.actualTokens !== undefined ? active.actualTokens : active.estimatedTokens
+    groups.push(`输出 ${active.actualTokens !== undefined ? '' : '~'}${formatInt(out)} token`)
+    groups.push(`首字延迟 ${formatDuration(active.firstTokenTime - active.startTime)}`)
   }
 
   if (groups.length === 0) {

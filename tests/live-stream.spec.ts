@@ -152,6 +152,16 @@ describe('LiveTokenRateTracker', () => {
     expect(t.snapshot(SESSION, 10200).stallMs).toBe(0)
   })
 
+  it('snapshot 暴露 generating：流结束前为真，endStep 后为假', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    t.beginStep(SESSION, 1000)
+    expect(t.snapshot(SESSION, 1100).generating).toBe(true)
+    t.fold(SESSION, tenTokenFrame(), 1200)
+    expect(t.snapshot(SESSION, 1300).generating).toBe(true)
+    t.endStep(SESSION)
+    expect(t.snapshot(SESSION, 1500).generating).toBe(false)
+  })
+
   it('正常 delta 间距不计为停顿', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.beginStep(SESSION, 1000)
@@ -161,17 +171,41 @@ describe('LiveTokenRateTracker', () => {
     expect(t.snapshot(SESSION, 1400).stallMs).toBe(0)
   })
 
-  it('beginStep 重置停顿与样本，开启新 step 计时', () => {
+  it('上一轮流全部结束后，新一轮 beginStep 重置停顿与样本，开启新 step 计时', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.beginStep(SESSION, 1000)
     t.fold(SESSION, tenTokenFrame(), 1200)
     const before = t.snapshot(SESSION, 1200)
     expect(before.stallMs).toBe(0)
     expect(before.tokensPerSecond).toBeDefined()
+    // 上一轮 llm/stream 结束，存活流归零。
+    t.endStep(SESSION)
+    // 新一轮 step：此时 beginStep 才视为全新 step，重置样本与停顿、重新起算。
     t.beginStep(SESSION, 20000)
     const snap = t.snapshot(SESSION, 21000)
     expect(snap.stallMs).toBe(0)
     expect(snap.tokensPerSecond).toBeUndefined()
+  })
+
+  it('前缀流与主内容流交错时，前缀 endStep 不误杀仍在流的主内容 generating', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    // 主内容流先 begin，标题/前缀流随后并存 begin，两条流时间重叠。
+    t.beginStep(SESSION, 1000)
+    t.beginStep(SESSION, 1002)
+    // 前缀流先出少量帧并收尾，此刻主内容流仍存活，generating 必须保持 true，样本不得被清。
+    t.fold(SESSION, tenTokenFrame(), 1500)
+    t.endStep(SESSION)
+    const during = t.snapshot(SESSION, 1600)
+    expect(during.generating).toBe(true)
+    expect(during.tokensPerSecond).toBeDefined()
+    // 主内容流此刻才真正出主体帧，速率照常累积。
+    for (let i = 0; i < 5; i += 1) t.fold(SESSION, tenTokenFrame(), 1700 + i * 10)
+    const mid = t.snapshot(SESSION, 1800)
+    expect(mid.generating).toBe(true)
+    expect(mid.tokensPerSecond).toBeDefined()
+    // 主内容流也收尾，存活流归零，generating 才翻 false。
+    t.endStep(SESSION)
+    expect(t.snapshot(SESSION, 1900).generating).toBe(false)
   })
 
   it('reset 丢弃会话单元', () => {
