@@ -127,8 +127,8 @@ interface RateCell {
   stallMs: number
   /** 最近一次有 token 样本的时刻，0 表示本 step 尚无样本，用于算进行中的停顿。 */
   lastSampleAt: number
-  /** 本 step 的 llm/stream 是否已结束，结束后不再累加进行中的停顿。 */
-  ended: boolean
+  /** 本会话当前存活的 llm/stream 数；0 表示无流在生成，此时冻结停顿并令 generating 为 false。 */
+  activeStreams: number
   /** 该会话的 BPE 增量切分状态，density 模式保持初始态。 */
   inc: IncrementalState
   /** tool-call 参数反转义的悬空尾部，跨帧维护于 cell.esc。 */
@@ -151,6 +151,8 @@ export interface LiveTokenSnapshot {
   stallMs: number
   /** 距上一次 delta 样本的毫秒数，0 表示刚有数据，用于观察当前卡了多久。 */
   sinceLastMs: number
+  /** 该 step 的模型生成是否仍在进行；流结束后为 false，客户端据此切到空闲态而非继续显示生成中。 */
+  generating: boolean
 }
 
 const INITIAL_RATE_CELL = (): RateCell => ({
@@ -159,7 +161,7 @@ const INITIAL_RATE_CELL = (): RateCell => ({
   stepStartAt: 0,
   stallMs: 0,
   lastSampleAt: 0,
-  ended: false,
+  activeStreams: 0,
   inc: { ...EMPTY_INCREMENTAL },
   esc: { ...EMPTY_UNESCAPE },
   nameCountedIds: new Set<string>(),
@@ -228,24 +230,28 @@ export class LiveTokenRateTracker {
   }
 
   /**
-   * 新 step 开始，每次 llm/stream 拦截到就调用。
-   * startAt 为拦截器收到事件的时刻，约等于请求发出时刻，TTFT 由此起算。
-   * 停顿与样本状态全部重置，避免跨 step 混算。
+   * 每次 llm/stream 拦截到就调用。同一会话的模型输出会被拆成多条 llm/stream 且时间交错，
+   * 前缀/预热流与主内容流重叠，若每条都重置 cell，前缀流的 endStep 会误杀仍在流的主内容流。
+   * 因此用存活流计数建模：首条流从 0 起算，全新 step 才全量重置；后续并存流只递增计数，
+   * 保留已在累积的主内容样本，计数归零才视为生成结束。startAt 为拦截时刻，TTFT 由此起算。
    */
   beginStep(sessionId: string, startAt: number): void {
     let cell = this.cells.get(sessionId)
+    const fresh = cell === undefined || cell.activeStreams === 0
     if (cell === undefined) {
       cell = INITIAL_RATE_CELL()
       this.cells.set(sessionId, cell)
     }
-    cell.samples = []
-    cell.stepStartAt = startAt
-    cell.stallMs = 0
-    cell.lastSampleAt = 0
-    cell.ended = false
-    cell.inc = { ...EMPTY_INCREMENTAL }
-    cell.esc = { ...EMPTY_UNESCAPE }
-    cell.nameCountedIds = new Set<string>()
+    if (fresh) {
+      cell.samples = []
+      cell.stepStartAt = startAt
+      cell.stallMs = 0
+      cell.lastSampleAt = 0
+      cell.inc = { ...EMPTY_INCREMENTAL }
+      cell.esc = { ...EMPTY_UNESCAPE }
+      cell.nameCountedIds = new Set<string>()
+    }
+    cell.activeStreams += 1
   }
 
   /**
@@ -255,7 +261,7 @@ export class LiveTokenRateTracker {
    */
   endStep(sessionId: string): void {
     const cell = this.cells.get(sessionId)
-    if (cell !== undefined) cell.ended = true
+    if (cell !== undefined) cell.activeStreams = Math.max(0, cell.activeStreams - 1)
   }
 
   /**
@@ -265,10 +271,10 @@ export class LiveTokenRateTracker {
    */
   snapshot(sessionId: string, asOf: number = Date.now()): LiveTokenSnapshot {
     const cell = this.cells.get(sessionId)
-    if (cell === undefined) return { updatedAt: 0, stallMs: 0, sinceLastMs: 0 }
+    if (cell === undefined) return { updatedAt: 0, stallMs: 0, sinceLastMs: 0, generating: true }
     const idleMs = cell.lastSampleAt > 0 ? Math.max(0, asOf - cell.lastSampleAt) : 0
     // 流结束后即工具执行等非生成时间，不再累加进行中的停顿，只保留生成期内已累计的部分。
-    const stallMs = cell.stallMs + (!cell.ended && idleMs >= STALL_GRACE_MS ? idleMs : 0)
+    const stallMs = cell.stallMs + (cell.activeStreams > 0 && idleMs >= STALL_GRACE_MS ? idleMs : 0)
     // 超窗样本逐批滑出窗口，长停顿后窗口内不再有样本。
     const window = this.spec.rateWindowMs
     const cutoff = asOf - window
@@ -284,7 +290,7 @@ export class LiveTokenRateTracker {
       const total = samples.reduce((acc, s) => acc + s.tokens, 0)
       rate = total / (spanMs / 1000)
     }
-    const out: LiveTokenSnapshot = { updatedAt: asOf, stallMs, sinceLastMs: idleMs }
+    const out: LiveTokenSnapshot = { updatedAt: asOf, stallMs, sinceLastMs: idleMs, generating: cell.activeStreams > 0 }
     if (rate !== undefined) out.tokensPerSecond = rate
     return out
   }
