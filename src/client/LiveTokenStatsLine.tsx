@@ -17,7 +17,7 @@
  */
 
 import { memo, useEffect, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import type { UseProjection } from '@deepseek-ai/dsh-client-runtime/client'
 import type { LiveTokenStatsLineInjected } from './index.ts'
 import type { LiveTokenStatsProjection } from '../projection.ts'
@@ -205,32 +205,53 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
     // 空态占位：没有任何 step 数据时也渲染一行，让用户能确认插件还活着。
     // 会话刚打开且从未产生过任何 step 时，投影里 active 与 lastSettled 均为空。
     // 旧的累计数显示才会在这种时候有东西看。
-    return <LiveStatsRow content="空闲 · 发起对话后显示实时速度 / 输出 / 首字延迟" />
+    return <LiveStatsRow segments={['空闲 · 发起对话后显示实时速度 / 输出 / 首字延迟']} />
   }
 
-  // 与早期版本一致：各指标块之间用 ` | ` 分隔，整行输出。
-  return <LiveStatsRow content={groups.join(' | ')} />
+  // 与原生结算统计行的结构一致：各指标块是独立 span，块间用 aria-hidden 的 `|` 分隔 span 隔开。
+  return <LiveStatsRow segments={groups} />
 })
 
-/** 单行统一样式容器：既承载实时数据也承载空态占位。 */
-function LiveStatsRow({ content }: { content: ReactNode }) {
+/**
+ * 单行统一样式容器，结构与 dsh 原生的结算统计行一致：
+ * 根容器一个 div，每个指标块是独立 span，块与块之间用 aria-hidden 的 `|` 分隔 span 隔开，末尾不带分隔符。
+ * 复刻时保留语义 token，不使用颜色字面量。
+ */
+
+/** 分隔符 span 的样式：比正文更淡的次级分隔点，避免喧宾夺主。 */
+const SEP_STYLE: CSSProperties = {
+  color: 'var(--dsw-alias-label-tertiary)',
+  whiteSpace: 'nowrap',
+}
+
+/** 根容器样式：一行次级小字，数值等宽对齐，块间与块内留出呼吸感。 */
+const ROOT_STYLE: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '12px',
+  flexWrap: 'wrap',
+  padding: '0 12px',
+  color: 'var(--dsw-alias-label-tertiary)',
+  fontSize: '13px',
+  fontVariantNumeric: 'tabular-nums',
+  lineHeight: '18px',
+  whiteSpace: 'nowrap',
+}
+
+function LiveStatsRow({ segments }: { segments: ReactNode[] }) {
+  const nodes: ReactNode[] = []
+  for (const [i, seg] of segments.entries()) {
+    // 分隔符只插在相邻块之间，末尾不带尾分隔符。
+    if (i > 0) {
+      nodes.push(
+        <span key={'sep-' + i} aria-hidden="true" style={SEP_STYLE}>|</span>,
+      )
+    }
+    nodes.push(<span key={'seg-' + i}>{seg}</span>)
+  }
   return (
-    <div
-      data-dsh-live-token-stats="true"
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: '6px',
-        flexWrap: 'wrap',
-        padding: '2px 8px',
-        color: 'var(--dsw-alias-label-tertiary)',
-        fontSize: '11.5px',
-        fontVariantNumeric: 'tabular-nums',
-        lineHeight: '18px',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {content}
+    <div data-dsh-live-token-stats="true" style={ROOT_STYLE}>
+      {nodes}
     </div>
   )
 }
