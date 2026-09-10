@@ -19,11 +19,10 @@
 import { memo, useEffect, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import type { UseProjection } from '@deepseek-ai/dsh-client-runtime/client'
-import type { LiveTokenStatsLineInjected } from './index.ts'
 import type { LiveTokenStatsProjection } from '../projection.ts'
 
 /** 停靠区所属方为组合/会话槽位交付的 props。 */
-export interface LiveTokenStatsLineProps extends LiveTokenStatsLineInjected {
+export interface LiveTokenStatsLineProps {
   useProjection: UseProjection
   /** 框架解析出的会话 id，所属方从不传入。 */
   sessionId: string
@@ -37,6 +36,16 @@ interface LiveRateSnapshot {
   sinceLastMs?: number
   /** 该 step 的模型生成是否仍在进行；false 表示流已结束，进入工具执行等停止态。 */
   generating?: boolean
+  /** 本 step 累计输出 token，官方 usage 已到则为实际值。 */
+  outputTokens?: number
+  /** outputTokens 是否为官方 usage 实际值。 */
+  exact?: boolean
+  /** 首 token 相对 step 起点的延迟毫秒，尚未出首字时缺省。 */
+  firstTokenDelayMs?: number
+  /** 本 step 已流逝毫秒。 */
+  elapsedMs?: number
+  /** 本 step 全程平均速度 tok/s。 */
+  avgTokensPerSecond?: number
 }
 
 // --- Formatting -------------------------------------------------------------
@@ -75,61 +84,70 @@ export function formatGapPct(estimated: number, actual: number): string {
   return `${sign}${rounded}%`
 }
 
-/** 重渲染计时：活跃步骤等待首字期间每秒 10 次。 */
-function useWaitingTick(activeStartTime: number | null): void {
-  const [, setTick] = useState(0)
-  useEffect(() => {
-    if (activeStartTime === null) return
-    const id = setInterval(() => setTick((t) => t + 1), 100)
-    return () => clearInterval(id)
-  }, [activeStartTime])
+/** 请求序号，用于 client-request/server-response 的 rpcId 配对。 */
+let rpcIdCounter = 0
+
+/**
+ * 直接向插件自注册通道发一次 snapshot 请求，复用官方信封，绕开取不到的 connection.rpc。
+ * @param sessionId - 目标会话。
+ * @returns 快照，任何非成功路径都返回 null。
+ */
+async function callSnapshot(sessionId: string): Promise<LiveRateSnapshot | null> {
+  const rpcId = 'lts-' + String(++rpcIdCounter)
+  const response = await fetch('/dsh-live-token-stats/snapshot', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      type: 'client-request',
+      rpcId,
+      method: 'snapshot',
+      payload: { sessionId },
+    }),
+  })
+  if (!response.ok) return null
+  const full = await response.json() as { type?: string; rpcId?: string; result?: { ok?: boolean; value?: LiveRateSnapshot } }
+  if (full.type !== 'server-response' || full.rpcId !== rpcId) return null
+  return full.result?.ok === true ? full.result.value ?? null : null
 }
 
 /**
- * 实时速率与停顿拉取：约 10 Hz RPC 轮询主机 `/dsh-live-token-stats` 通道以取本会话数据。
- * 主机会话在每次轮询时按当下时刻计算速率，因此流停顿期间数值也在移动，无需本地计时。
- * 仅在有活跃 step 时轮询，即 enabled 为真，空闲时不发任何请求，避免空转流量。
+ * 实时快照拉取：向主机 `/dsh-live-token-stats` 通道轮询本会话数据。
+ * 主机在每次轮询时按当下时刻计算速率，因此流停顿期间数值也在移动，无需本地计时。
+ * 模型生成中约 10 Hz，step 仍在但生成已停的工具阶段降到约 2 Hz，空闲只留 5 秒一次的兜底探测，基本不产生空转流量。
+ * dsh 0.1.5-rc.2 起会话投影不再有实时增量，投影的 active 只用来判断 step 是否在跑，实时数值仍取自快照。
  */
 function useLiveSnapshot(
-  rpc: LiveTokenStatsLineInjected['rpc'],
   sessionId: string,
-  enabled: boolean,
-): { rate: number | undefined; stallMs: number; generating: boolean } {
-  const [live, setLive] = useState<{ rate: number | undefined; stallMs: number; generating: boolean }>({ rate: undefined, stallMs: 0, generating: true })
+  active: boolean,
+): LiveRateSnapshot | null {
+  const [live, setLive] = useState<LiveRateSnapshot | null>(null)
   useEffect(() => {
-    // 空闲态即无活跃 step 时停掉轮询；进入活跃态时 effect 重建并立即拉一次。
-    if (!enabled) return
     let disposed = false
-    let timer: ReturnType<typeof setInterval> | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
     const poll = async (): Promise<void> => {
+      let delayMs = active ? 100 : 5000
       try {
-        const result = await rpc.call(
-          '/dsh-live-token-stats',
-          'snapshot',
-          { sessionId },
-        )
+        const data = await callSnapshot(sessionId)
         if (disposed) return
-        if (result.ok) {
-          const data = (result as { value?: LiveRateSnapshot }).value
-          setLive({
-            rate: typeof data?.tokensPerSecond === 'number' ? data.tokensPerSecond : undefined,
-            stallMs: data?.stallMs ?? 0,
-            generating: data?.generating ?? true,
-          })
-        } else {
-          setLive({ rate: undefined, stallMs: 0, generating: true })
+        setLive(data)
+        if (data?.generating === true) {
+          delayMs = 100
+        } else if (active) {
+          // step 仍在但生成已停，例如工具执行阶段，降到 500ms 减少空转。
+          delayMs = 500
         }
       } catch {
-        if (!disposed) setLive({ rate: undefined, stallMs: 0, generating: true })
+        if (disposed) return
+        setLive(null)
       }
+      if (!disposed) timer = setTimeout(() => void poll(), delayMs)
     }
     void poll()
-    timer = setInterval(() => void poll(), 100)
     return () => {
       disposed = true
-      if (timer !== undefined) clearInterval(timer)
+      if (timer !== undefined) clearTimeout(timer)
     }
-  }, [rpc, sessionId, enabled])
+  }, [sessionId, active])
   return live
 }
 
@@ -137,18 +155,21 @@ function useLiveSnapshot(
 export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
   useProjection,
   sessionId,
-  rpc,
 }: LiveTokenStatsLineProps) {
   const live = useProjection('liveTokenStats') as LiveTokenStatsProjection | undefined
   const active = live?.active ?? null
   const lastSettled = live?.lastSettled ?? null
-  const liveSnap = useLiveSnapshot(rpc, sessionId, active !== null)
-  const liveRate = liveSnap.rate
-  const stallMs = liveSnap.stallMs
-  const generating = liveSnap.generating
+  const liveSnap = useLiveSnapshot(sessionId, active !== null)
+  const generating = liveSnap?.generating === true
+  const firstTokenDelay = liveSnap?.firstTokenDelayMs
+  const liveRate = liveSnap?.tokensPerSecond
+  const stallMs = liveSnap?.stallMs ?? 0
+  // step 的精确开始时刻来自投影 step/start 事件，快照的 elapsedMs 仅在没有它时兜底。
+  const startTime = active?.startTime
 
-  const waiting = active !== null && active.firstTokenTime === null && generating
-  useWaitingTick(waiting ? active.startTime : null)
+  // dsh 0.1.5-rc.2 起流式增量不再逐块进会话事件，投影没有实时数据，
+  // 生成中的首字、输出与速度以主机 llm/stream 快照为准，投影提供开始时刻与结算读数。
+  const waiting = generating && firstTokenDelay === undefined
 
   const groups: string[] = []
 
@@ -170,35 +191,32 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
     return out
   }
 
-  if (active !== null && active.firstTokenTime !== null && generating) {
+  if (generating && firstTokenDelay !== undefined) {
     // 状态一：生成中，已出首字。停顿超窗无样本后速率格消失，只剩已停顿计时。
     if (liveRate !== undefined) groups.push(`实时速度 ~${formatTps(liveRate)} tok/s`)
     if (stallMs > 0) groups.push(`已停顿 ${formatDuration(stallMs)}`)
-    const out = active.exact && active.actualTokens !== undefined ? active.actualTokens : active.estimatedTokens
-    groups.push(`实时输出 ~${formatInt(out)} token`)
+    const out = liveSnap?.outputTokens ?? 0
+    groups.push(`实时输出 ${liveSnap?.exact === true ? '' : '~'}${formatInt(out)} token`)
     // 平均速度：本 step 自请求发出起的全程平均，分母含首字延迟与一切停顿，与窗口化的实时速度并列对照，可看出推流在加速还是减速。
-    const elapsedMs = Date.now() - active.startTime
-    if (elapsedMs > 0) groups.push(`平均速度 ~${formatTps(out / (elapsedMs / 1000))} tok/s`)
-    groups.push(`首字延迟 ${formatDuration(active.firstTokenTime - active.startTime)}`)
-  } else if (active !== null && active.firstTokenTime === null && generating) {
+    if (liveSnap?.avgTokensPerSecond !== undefined) groups.push(`平均速度 ${liveSnap.exact === true ? '' : '~'}${formatTps(liveSnap.avgTokensPerSecond)} tok/s`)
+    groups.push(`首字延迟 ${formatDuration(firstTokenDelay)}`)
+  } else if (waiting) {
     // 状态二：等待首字，尚无 token，无实时速度与实时输出。结算读数保持为对照基线。
-    // 首字延迟显示本次等待的实时耗时，由 useWaitingTick 以 10 Hz 驱动重渲染逐帧上涨，首字落地的瞬间自然定格为该 step 的精确 TTFT。
+    // 等待耗时优先用投影的 step 开始时刻，由 10 Hz 轮询驱动重渲染逐帧上涨，首字落地瞬间定格为精确 TTFT。
     groups.push(...settledGroups())
-    groups.push(`首字延迟 ${formatDuration(Date.now() - active.startTime)}`)
+    const elapsedMs = startTime !== undefined ? Date.now() - startTime : liveSnap?.elapsedMs
+    if (elapsedMs !== undefined) groups.push(`首字延迟 ${formatDuration(elapsedMs)}`)
   } else if (lastSettled !== null) {
     // 状态三：空闲态，上次已结算。生成已停止但 step 未结束，例如工具执行中，也落回此态。
     groups.push(...settledGroups())
     if (lastSettled.firstTokenTime !== null) {
       groups.push(`首字延迟 ${formatDuration(lastSettled.firstTokenTime - lastSettled.startTime)}`)
     }
-  } else if (active !== null && active.firstTokenTime !== null) {
-    // 状态三的兜底：流已停止、step 未结束，但尚无任何历史结算——正是第一步常见情形，
-    // 例如本 step 已推完文字、正在执行工具或等待结算。此时没有上一笔 lastSettled 可作对照基线，
-    // 改显示本 step 已累计的输出 token 与首字延迟，而不是误渲染「还没发起对话」的空态占位符。
-    // 第 2、3… 步因存在 lastSettled 会命中状态三，不会走到这里。
-    const out = active.actualTokens !== undefined ? active.actualTokens : active.estimatedTokens
-    groups.push(`输出 ${active.actualTokens !== undefined ? '' : '~'}${formatInt(out)} token`)
-    groups.push(`首字延迟 ${formatDuration(active.firstTokenTime - active.startTime)}`)
+  } else if (liveSnap !== null && (liveSnap.outputTokens ?? 0) > 0) {
+    // 状态三的兜底：流已停止但投影尚未结算，用主机快照里本 step 的累计作对照基线。
+    const out = liveSnap.outputTokens ?? 0
+    groups.push(`输出 ${liveSnap.exact === true ? '' : '~'}${formatInt(out)} token`)
+    if (liveSnap.firstTokenDelayMs !== undefined) groups.push(`首字延迟 ${formatDuration(liveSnap.firstTokenDelayMs)}`)
   }
 
   if (groups.length === 0) {

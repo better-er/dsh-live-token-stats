@@ -3,16 +3,18 @@ import { ESTIMATOR_DEFAULTS, type EstimatorSpec } from '../src/estimator.ts'
 import {
   activeStepApply,
   createLiveTokenStatsDefinition,
-  throughputApply,
   type ActiveStepState,
-  type ThroughputState,
 } from '../src/projection.ts'
 import { tokenCount } from '../src/tokenizer/bpe.ts'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { SessionEvent, SessionHeader, SessionLogOffset } from '@deepseek-ai/dsh-session'
 
 // 旧行为测试显式用 density 模式，数值断言不变，bpe 模式在下方专项用例验证。
 const SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'density' }
 const BPE_SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'bpe' }
+
+/** 空日志初始化参数：header 与继承前缀对被测折叠没有影响。 */
+const HEADER = {} as SessionHeader
+const NO_INHERIT = 0 as unknown as SessionLogOffset
 
 /** 构建一个最小会话事件。被测的折叠不关心 seq。 */
 function event(seq: number, type: string, data: unknown, time = 1000 + seq * 10): SessionEvent {
@@ -36,7 +38,6 @@ function stepEnd(seq: number, turn = 0, step = 0, time = 1000 + seq * 10): Sessi
 }
 
 const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null, inc: { buffer: '', counted: 0 }, esc: { tail: '' }, nameCountedIds: [] }
-const THROUGHPUT_INIT: ThroughputState = { samples: [], totalTokens: 0, currentRate: undefined, inc: { buffer: '', counted: 0 }, esc: { tail: '' }, nameCountedIds: [] }
 
 describe('activeStepApply', () => {
   it('step/start 打开一个 step', () => {
@@ -75,6 +76,24 @@ describe('activeStepApply', () => {
     expect(s.active!.firstTokenTime).toBeNull()
   })
 
+  it('v2：从 assistant/message.stream 折算估算与首字', () => {
+    let s = activeStepApply(ACTIVE_INIT, stepStart(0, 0, 0, 1000), SPEC)
+    s = activeStepApply(s, event(1, 'assistant/message', {
+      turn: 0,
+      step: 0,
+      // 紧凑记录：第 i 个成员的原始时间 = time0 + 前 i 个 dt 之和
+      stream: [{ type: 'text-chunks', time0: 1010, index: 0, dt: [10], texts: ['hello', ' world'] }],
+      usage: { inputTokens: 0, outputTokens: 20 },
+    }, 1030), SPEC)
+    expect(s.active!.firstTokenTime).toBe(1010)
+    // hello 计 2，world 计 2
+    expect(s.active!.estimatedTokens).toBe(4)
+    expect(s.active!.actualTokens).toBe(20)
+    expect(s.active!.exact).toBe(true)
+    s = activeStepApply(s, stepEnd(2, 0, 0, 2000), SPEC)
+    expect(s.lastSettled).toMatchObject({ firstTokenTime: 1010, estimatedTokens: 4, actualTokens: 20 })
+  })
+
   it('step/end 结算进 lastSettled 并同时记录估算与实际', () => {
     let s = activeStepApply(ACTIVE_INIT, stepStart(0, 3, 4, 1000), SPEC)
     s = activeStepApply(s, textDelta(1, 'hi', 1010), SPEC)
@@ -101,27 +120,12 @@ describe('activeStepApply', () => {
   })
 })
 
-describe('throughputApply', () => {
-  it('窗口内计算实时速率', () => {
-    let t: ThroughputState = THROUGHPUT_INIT
-    t = throughputApply(t, textDelta(1, 'aaaa', 1000), SPEC)
-    t = throughputApply(t, textDelta(2, 'aaaa', 2000), SPEC)
-    // 4 个 ascii 乘 0.3 等于 1.2 每段计 1 token，2 token 除以 1s 得 2 tok/s
-    expect(t.currentRate).toBeCloseTo(2, 5)
-  })
-
-  it('忽略非 delta 块', () => {
-    const t = throughputApply(THROUGHPUT_INIT, event(1, 'assistant/chunk', { turn: 0, step: 0, chunk: { type: 'block-start', index: 0, blockType: 'text' } }), SPEC)
-    expect(t).toBe(THROUGHPUT_INIT)
-  })
-})
-
 describe('createLiveTokenStatsDefinition', () => {
   it('是可重放投影，含 init/apply/wire/stateSchema/stateVersion', () => {
     const def = createLiveTokenStatsDefinition(SPEC)
     expect(def.key).toBe('liveTokenStats')
-    expect(def.stateVersion).toBe(5)
-    const init = def.init()
+    expect(def.stateVersion).toBe(7)
+    const init = def.init(HEADER, NO_INHERIT)
     expect(def.wire!.view(init)).toEqual({ active: null, lastSettled: null })
     // 持久化状态必须能过 stateSchema，这是缓存恢复的前提
     expect(def.stateSchema.parse(init)).toEqual(init)
@@ -129,7 +133,7 @@ describe('createLiveTokenStatsDefinition', () => {
 
   it('view 输出含估算与实际 token 且过边界 schema', () => {
     const def = createLiveTokenStatsDefinition(SPEC)
-    let state = def.init()
+    let state = def.init(HEADER, NO_INHERIT)
     state = def.apply(state, stepStart(0, 0, 0, 1000))
     state = def.apply(state, textDelta(1, 'hello', 1010))
     state = def.apply(state, usageChunk(2, 9, 1020))
@@ -149,20 +153,14 @@ describe('BPE 模式，tokenizerMode: bpe', () => {
     expect(s.active!.estimatedTokens).toBe(tokenCount('发展中国特色社会主义'))
   })
 
-  it('throughput 的样本 token 数与真实 BPE 切分一致', () => {
-    let t = throughputApply(THROUGHPUT_INIT, textDelta(1, '苹果 banana 123', 1000), BPE_SPEC)
-    // 单帧 total 增量 = 全文 token 数
-    expect(t.samples[0].tokens).toBe(tokenCount('苹果 banana 123'))
-  })
-
   it('持久化状态含增量字段且可过 stateSchema，可重放', () => {
     const def = createLiveTokenStatsDefinition(BPE_SPEC)
-    let state = def.init()
+    let state = def.init(HEADER, NO_INHERIT)
     state = def.apply(state, stepStart(0, 0, 0, 1000))
     state = def.apply(state, textDelta(1, '你好 world', 1010))
     expect(def.stateSchema.parse(state)).toEqual(state)
     // 重放：相同事件序列得到相同状态
-    const init2 = def.init()
+    const init2 = def.init(HEADER, NO_INHERIT)
     const replayed = def.apply(init2, stepStart(0, 0, 0, 1000))
     const replayed2 = def.apply(replayed, textDelta(1, '你好 world', 1010))
     expect(replayed2).toEqual(state)
@@ -255,10 +253,5 @@ describe('BPE 模式：tool-call 参数反转义，官方按解码后内容计�
     s = activeStepApply(s, textDelta(1, 'a\\nb', 1010), BPE_SPEC)
     // text-delta 的内容就是原样文本，反斜杠加 n 保持 2 字符，与旧行为一致
     expect(s.active!.estimatedTokens).toBe(tokenCount('a\\nb'))
-  })
-
-  it('throughput 同样按解码后内容计数', () => {
-    let t = throughputApply(THROUGHPUT_INIT, toolCallDelta(1, '{"content": "a\\nb"}'), BPE_SPEC)
-    expect(t.samples[0].tokens).toBe(tokenCount('{"content": "a\nb"}') + tokenCount('write'))
   })
 })
