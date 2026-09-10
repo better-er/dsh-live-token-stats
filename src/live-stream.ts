@@ -34,6 +34,7 @@ import {
   type IncrementalState,
 } from './tokenizer/incremental.ts'
 import { EMPTY_UNESCAPE, unescapeFeed, type UnescapeState } from './tokenizer/unescape.ts'
+import { mountRpcChannel } from './rpc-channel.ts'
 
 /**
  * 单个工具调用名的 token 数，BPE 或 density 按 spec 计价。
@@ -135,6 +136,12 @@ interface RateCell {
   esc: UnescapeState
   /** 已计入 name token 的工具调用 id，同一调用跨帧只计一次。 */
   nameCountedIds: Set<string>
+  /** 本 step 累计估算输出 token，含已滑出窗口的样本，因此与 samples 不同步。 */
+  totalTokens: number
+  /** 官方 usage 上报的输出 token；存在时优先于估算。 */
+  usageOutputTokens?: number
+  /** 本 step 首个 token 样本的墙钟毫秒，0 表示尚无样本。 */
+  firstSampleAt: number
 }
 
 /** 提供给客户端、针对某个会话的实时快照。 */
@@ -153,6 +160,16 @@ export interface LiveTokenSnapshot {
   sinceLastMs: number
   /** 该 step 的模型生成是否仍在进行；流结束后为 false，客户端据此切到空闲态而非继续显示生成中。 */
   generating: boolean
+  /** 本 step 累计输出 token：官方 usage 已到则用实际值，否则为估算。 */
+  outputTokens?: number
+  /** outputTokens 是否为官方 usage 实际值。 */
+  exact?: boolean
+  /** 首 token 相对 step 起点的延迟毫秒，尚未出首字时缺省。 */
+  firstTokenDelayMs?: number
+  /** 本 step 已流逝毫秒。 */
+  elapsedMs?: number
+  /** 本 step 全程平均速度 tok/s，含首字延迟与停顿。 */
+  avgTokensPerSecond?: number
 }
 
 const INITIAL_RATE_CELL = (): RateCell => ({
@@ -165,6 +182,8 @@ const INITIAL_RATE_CELL = (): RateCell => ({
   inc: { ...EMPTY_INCREMENTAL },
   esc: { ...EMPTY_UNESCAPE },
   nameCountedIds: new Set<string>(),
+  totalTokens: 0,
+  firstSampleAt: 0,
 })
 
 /**
@@ -179,6 +198,16 @@ export class LiveTokenRateTracker {
   /** 把一个 adapter chunk 折叠进其会话的速率单元。相对流本身为纯函数。 */
   fold(sessionId: string | undefined, chunk: StreamChunk, timeMs: number): void {
     if (sessionId === undefined) return
+    // 官方 usage：记下实际输出 token，作为本 step 的精确值覆盖估算。
+    if (chunk.type === 'usage' && chunk.usage && typeof chunk.usage.outputTokens === 'number') {
+      let usageCell = this.cells.get(sessionId)
+      if (usageCell === undefined) {
+        usageCell = INITIAL_RATE_CELL()
+        this.cells.set(sessionId, usageCell)
+      }
+      usageCell.usageOutputTokens = chunk.usage.outputTokens
+      return
+    }
     if (!isTokenDelta(chunk)) return
     const text = deltaTextOf(chunk)
     // 工具名 token 每个调用只计一次：DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name，
@@ -225,6 +254,8 @@ export class LiveTokenRateTracker {
     }
     cell.inc = inc
     cell.esc = esc
+    if (cell.firstSampleAt === 0) cell.firstSampleAt = timeMs
+    cell.totalTokens += tokensAdded
     cell.samples.push({ time: timeMs, tokens: tokensAdded })
     cell.lastSampleAt = timeMs
   }
@@ -247,6 +278,9 @@ export class LiveTokenRateTracker {
       cell.stepStartAt = startAt
       cell.stallMs = 0
       cell.lastSampleAt = 0
+      cell.totalTokens = 0
+      cell.usageOutputTokens = undefined
+      cell.firstSampleAt = 0
       cell.inc = { ...EMPTY_INCREMENTAL }
       cell.esc = { ...EMPTY_UNESCAPE }
       cell.nameCountedIds = new Set<string>()
@@ -271,7 +305,8 @@ export class LiveTokenRateTracker {
    */
   snapshot(sessionId: string, asOf: number = Date.now()): LiveTokenSnapshot {
     const cell = this.cells.get(sessionId)
-    if (cell === undefined) return { updatedAt: 0, stallMs: 0, sinceLastMs: 0, generating: true }
+    // 该会话从未被拦到流：没有在生成，避免界面误入等待首字态。
+    if (cell === undefined) return { updatedAt: 0, stallMs: 0, sinceLastMs: 0, generating: false, outputTokens: 0, exact: false }
     const idleMs = cell.lastSampleAt > 0 ? Math.max(0, asOf - cell.lastSampleAt) : 0
     // 流结束后即工具执行等非生成时间，不再累加进行中的停顿，只保留生成期内已累计的部分。
     const stallMs = cell.stallMs + (cell.activeStreams > 0 && idleMs >= STALL_GRACE_MS ? idleMs : 0)
@@ -290,8 +325,20 @@ export class LiveTokenRateTracker {
       const total = samples.reduce((acc, s) => acc + s.tokens, 0)
       rate = total / (spanMs / 1000)
     }
-    const out: LiveTokenSnapshot = { updatedAt: asOf, stallMs, sinceLastMs: idleMs, generating: cell.activeStreams > 0 }
+    const outputTokens = cell.usageOutputTokens ?? cell.totalTokens
+    const elapsedMs = cell.stepStartAt > 0 ? Math.max(0, asOf - cell.stepStartAt) : 0
+    const out: LiveTokenSnapshot = {
+      updatedAt: asOf,
+      stallMs,
+      sinceLastMs: idleMs,
+      generating: cell.activeStreams > 0,
+      outputTokens,
+      exact: cell.usageOutputTokens !== undefined,
+    }
     if (rate !== undefined) out.tokensPerSecond = rate
+    if (cell.firstSampleAt > 0 && cell.stepStartAt > 0) out.firstTokenDelayMs = Math.max(0, cell.firstSampleAt - cell.stepStartAt)
+    if (elapsedMs > 0) out.elapsedMs = elapsedMs
+    if (elapsedMs > 0 && outputTokens > 0) out.avgTokensPerSecond = outputTokens / (elapsedMs / 1000)
     return out
   }
 
@@ -441,21 +488,13 @@ export function installHostLiveStream(
   )
 
   // 在共享连接传输上挂载客户端拉取用的 RPC 通道。
-  let offRpc: (() => Promise<void>) | undefined
-  const connection = ctx.connection
-  if (connection !== undefined) {
-    offRpc = connection.rpc.handle(
-      '/dsh-live-token-stats',
-      createLiveStreamRpcHandler(tracker),
-      { authority: 'loopback' },
-    )
-  }
+  // dsh 0.1.5 的 connection.rpc.handle 在登记路由时解析 webServer 会抛 without inject，改为插件自注册通道。
+  mountRpcChannel(ctx, '/dsh-live-token-stats', createLiveStreamRpcHandler(tracker))
 
   return {
     tracker,
     dispose: () => {
       offStream()
-      offRpc?.()
     },
   }
 }

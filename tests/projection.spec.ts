@@ -75,6 +75,24 @@ describe('activeStepApply', () => {
     expect(s.active!.firstTokenTime).toBeNull()
   })
 
+  it('v2：从 assistant/message.stream 折算估算与首字', () => {
+    let s = activeStepApply(ACTIVE_INIT, stepStart(0, 0, 0, 1000), SPEC)
+    s = activeStepApply(s, event(1, 'assistant/message', {
+      turn: 0,
+      step: 0,
+      // 紧凑记录：第 i 个成员的原始时间 = time0 + 前 i 个 dt 之和
+      stream: [{ type: 'text-chunks', time0: 1010, index: 0, dt: [10], texts: ['hello', ' world'] }],
+      usage: { inputTokens: 0, outputTokens: 20 },
+    }, 1030), SPEC)
+    expect(s.active!.firstTokenTime).toBe(1010)
+    // hello 计 2，world 计 2
+    expect(s.active!.estimatedTokens).toBe(4)
+    expect(s.active!.actualTokens).toBe(20)
+    expect(s.active!.exact).toBe(true)
+    s = activeStepApply(s, stepEnd(2, 0, 0, 2000), SPEC)
+    expect(s.lastSettled).toMatchObject({ firstTokenTime: 1010, estimatedTokens: 4, actualTokens: 20 })
+  })
+
   it('step/end 结算进 lastSettled 并同时记录估算与实际', () => {
     let s = activeStepApply(ACTIVE_INIT, stepStart(0, 3, 4, 1000), SPEC)
     s = activeStepApply(s, textDelta(1, 'hi', 1010), SPEC)
@@ -120,7 +138,7 @@ describe('createLiveTokenStatsDefinition', () => {
   it('是可重放投影，含 init/apply/wire/stateSchema/stateVersion', () => {
     const def = createLiveTokenStatsDefinition(SPEC)
     expect(def.key).toBe('liveTokenStats')
-    expect(def.stateVersion).toBe(5)
+    expect(def.stateVersion).toBe(6)
     const init = def.init()
     expect(def.wire!.view(init)).toEqual({ active: null, lastSettled: null })
     // 持久化状态必须能过 stateSchema，这是缓存恢复的前提

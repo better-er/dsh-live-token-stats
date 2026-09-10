@@ -136,6 +136,86 @@ function toolNameTokenCount(name: string, spec: Readonly<EstimatorSpec>): number
   return spec.tokenizerMode === 'bpe' ? tokenCount(name) : estimateTextTokens(name, spec)
 }
 
+/**
+ * 展开 dsh 0.1.5-rc.2 的紧凑流记录为带原始时间的 delta 序列，等价官方 expandAssistantStream。
+ * 流式增量不再逐块进会话事件，而是打包在 assistant/message.stream 里随结算一次到达。
+ * 未知或残缺记录一律跳过，避免一条坏记录让整个投影单元失效。
+ */
+function expandCompactStream(stream: readonly unknown[]): { time: number; chunk: StreamChunk }[] {
+  const out: { time: number; chunk: StreamChunk }[] = []
+  for (const raw of stream) {
+    if (typeof raw !== 'object' || raw === null) continue
+    const record = raw as Record<string, unknown>
+    const type = record.type
+    if (type === 'chunk') {
+      const chunk = record.chunk as StreamChunk | undefined
+      if (chunk === undefined) continue
+      out.push({ time: typeof record.time === 'number' ? record.time : 0, chunk })
+      continue
+    }
+    const members = type === 'tool-call-chunks'
+      ? record.args
+      : type === 'text-chunks' || type === 'reasoning-chunks' ? record.texts : undefined
+    if (!Array.isArray(members)) continue
+    const dt = Array.isArray(record.dt) ? record.dt as number[] : []
+    const index = typeof record.index === 'number' ? record.index : 0
+    let time = typeof record.time0 === 'number' ? record.time0 : 0
+    for (let member = 0; member < members.length; member += 1) {
+      if (member > 0) time += dt[member - 1] ?? 0
+      const text = typeof members[member] === 'string' ? members[member] as string : ''
+      let chunk: StreamChunk
+      if (type === 'text-chunks') chunk = { type: 'text-delta', index, text }
+      else if (type === 'reasoning-chunks') chunk = { type: 'reasoning-delta', index, text }
+      else chunk = {
+        type: 'tool-call-delta',
+        index,
+        id: String(record.id ?? ''),
+        ...(typeof record.name === 'string' ? { name: record.name } : {}),
+        argumentsDelta: text,
+      } as unknown as StreamChunk
+      out.push({ time, chunk })
+    }
+  }
+  return out
+}
+
+/** 把一个 delta 折叠进活跃步骤，工具名按调用 id 去重只计一次。 */
+function foldActiveDelta(
+  state: ActiveStepState,
+  chunk: StreamChunk,
+  time: number,
+  spec: Readonly<EstimatorSpec>,
+): ActiveStepState {
+  const active = state.active
+  if (active === null || active.exact || !isDeltaChunk(chunk)) return state
+  const text = deltaText(chunk)
+  let nameTokens = 0
+  let nameCountedIds = state.nameCountedIds
+  if (chunk.type === 'tool-call-delta') {
+    const name = chunk.name
+    if (typeof name === 'string' && name.length > 0 && !nameCountedIds.includes(chunk.id)) {
+      nameTokens = toolNameTokenCount(name, spec)
+      nameCountedIds = [...nameCountedIds, chunk.id]
+    }
+  }
+  if (text.length === 0 && nameTokens === 0) return state
+  const esc = chunk.type === 'tool-call-delta' ? decodeToolArgument(text, state.esc) : undefined
+  const countText = esc !== undefined ? esc.text : text
+  const { added, inc } =
+    countText.length > 0 ? countDeltaTokens(countText, spec, state.inc) : { added: 0, inc: state.inc }
+  return {
+    ...state,
+    inc,
+    nameCountedIds,
+    ...(esc !== undefined ? { esc: esc.esc } : {}),
+    active: {
+      ...active,
+      firstTokenTime: active.firstTokenTime === null ? time : active.firstTokenTime,
+      estimatedTokens: active.estimatedTokens + added + nameTokens,
+    },
+  }
+}
+
 const ACTIVE_INIT: ActiveStepState = {
   active: null,
   lastSettled: null,
@@ -172,10 +252,11 @@ export function activeStepApply(
   if (state.active === null) return state
 
   if (type === 'assistant/chunk') {
+    // 兼容 dsh 0.1.5-rc.1 及更早的已发布 v1 日志，v2 起不再产生该事件。
     const chunk = data.chunk
     if (chunk.type === 'usage' && chunk.usage && typeof chunk.usage.outputTokens === 'number') {
       // 官方 usage：记住实际值，估算保持不动，便于之后推导结算偏差。
-      return {
+      return state.active === null ? state : {
         ...state,
         active: {
           ...state.active,
@@ -184,51 +265,28 @@ export function activeStepApply(
         },
       }
     }
-    if (!isDeltaChunk(chunk) || state.active.exact) return state
-    const text = deltaText(chunk)
-    // 工具名 token 每个调用只计一次：DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name，
-    // 逐帧累加会把 name 重复计数，按工具调用 id 去重，仅首次出现计入。
-    let nameTokens = 0
-    let nameCountedIds = state.nameCountedIds
-    if (chunk.type === 'tool-call-delta') {
-      const name = chunk.name
-      if (typeof name === 'string' && name.length > 0 && !nameCountedIds.includes(chunk.id)) {
-        nameTokens = toolNameTokenCount(name, spec)
-        nameCountedIds = [...nameCountedIds, chunk.id]
-      }
-    }
-    if (text.length === 0 && nameTokens === 0) return state
-    // 工具参数先反转义再计数，跨帧悬空尾部挂在 esc 状态上
-    const esc = chunk.type === 'tool-call-delta' ? decodeToolArgument(text, state.esc) : undefined
-    const countText = esc !== undefined ? esc.text : text
-    const { added, inc } =
-      countText.length > 0 ? countDeltaTokens(countText, spec, state.inc) : { added: 0, inc: state.inc }
-    return {
-      ...state,
-      inc,
-      nameCountedIds,
-      ...esc !== undefined ? { esc: esc.esc } : {},
-      active: {
-        ...state.active,
-        firstTokenTime: state.active.firstTokenTime === null ? event.time : state.active.firstTokenTime,
-        estimatedTokens: state.active.estimatedTokens + added + nameTokens,
-      },
-    }
+    return foldActiveDelta(state, chunk, event.time, spec)
   }
 
   if (type === 'assistant/message') {
-    const usage = data.usage
-    if (usage !== undefined && typeof usage.outputTokens === 'number') {
-      return {
-        ...state,
-        active: {
-          ...state.active,
-          actualTokens: usage.outputTokens,
-          exact: true,
-        },
+    // v2 事件模型把本 step 的紧凑流随结算一次送到，展开折叠出估算与实际值，
+    // 结算读数因此仍然成立，实时部分改由 llm/stream 快照负责。
+    const message = data as { stream?: readonly unknown[]; usage?: { outputTokens?: number } }
+    let next = state
+    if (Array.isArray(message.stream)) {
+      for (const item of expandCompactStream(message.stream)) {
+        if (item.chunk.type === 'usage' && item.chunk.usage && typeof item.chunk.usage.outputTokens === 'number') {
+          if (next.active !== null) next = { ...next, active: { ...next.active, actualTokens: item.chunk.usage.outputTokens, exact: true } }
+          continue
+        }
+        next = foldActiveDelta(next, item.chunk, item.time, spec)
       }
     }
-    return state
+    const usage = message.usage
+    if (usage !== undefined && typeof usage.outputTokens === 'number' && next.active !== null) {
+      next = { ...next, active: { ...next.active, actualTokens: usage.outputTokens, exact: true } }
+    }
+    return next
   }
 
   if (type === 'step/end') {
@@ -312,43 +370,60 @@ function slideWindow(state: ThroughputState, asOf: number, spec: Readonly<Estima
   return { samples, totalTokens: total, currentRate, inc: state.inc, esc: state.esc, nameCountedIds: state.nameCountedIds }
 }
 
+/** 把一个 delta 折叠进吞吐窗口，与 activeStep 同口径。 */
+function foldThroughputDelta(
+  state: ThroughputState,
+  chunk: StreamChunk,
+  time: number,
+  spec: Readonly<EstimatorSpec>,
+): ThroughputState {
+  if (!isDeltaChunk(chunk)) return state
+  const text = deltaText(chunk)
+  // 工具名 token 每个调用只计一次，按工具调用 id 去重，与 activeStep 同口径。
+  let nameTokens = 0
+  let nameCountedIds = state.nameCountedIds
+  if (chunk.type === 'tool-call-delta') {
+    const name = chunk.name
+    if (typeof name === 'string' && name.length > 0 && !nameCountedIds.includes(chunk.id)) {
+      nameTokens = toolNameTokenCount(name, spec)
+      nameCountedIds = [...nameCountedIds, chunk.id]
+    }
+  }
+  if (text.length === 0 && nameTokens === 0) return state
+  // 工具参数先反转义再计数，跨帧悬空尾部挂在 esc 状态上
+  const esc = chunk.type === 'tool-call-delta' ? decodeToolArgument(text, state.esc) : undefined
+  const countText = esc !== undefined ? esc.text : text
+  const { added, inc } =
+    countText.length > 0 ? countDeltaTokens(countText, spec, state.inc) : { added: 0, inc: state.inc }
+  return slideWindow(
+    {
+      samples: [...state.samples, { time, tokens: added + nameTokens }],
+      totalTokens: state.totalTokens + added + nameTokens,
+      currentRate: state.currentRate,
+      inc,
+      esc: esc !== undefined ? esc.esc : state.esc,
+      nameCountedIds,
+    },
+    time,
+    spec,
+  )
+}
+
 /** 吞吐指标单元的纯折叠。 */
 export function throughputApply(
   state: ThroughputState,
   event: SessionEvent,
   spec: Readonly<EstimatorSpec>,
 ): ThroughputState {
-  if (event.type === 'assistant/chunk' && isDeltaChunk(event.data.chunk)) {
-    const chunk = event.data.chunk
-    const text = deltaText(chunk)
-    // 工具名 token 每个调用只计一次，按工具调用 id 去重，与 activeStep 同口径。
-    let nameTokens = 0
-    let nameCountedIds = state.nameCountedIds
-    if (chunk.type === 'tool-call-delta') {
-      const name = chunk.name
-      if (typeof name === 'string' && name.length > 0 && !nameCountedIds.includes(chunk.id)) {
-        nameTokens = toolNameTokenCount(name, spec)
-        nameCountedIds = [...nameCountedIds, chunk.id]
-      }
-    }
-    if (text.length === 0 && nameTokens === 0) return state
-    // 工具参数先反转义再计数，跨帧悬空尾部挂在 esc 状态上
-    const esc = chunk.type === 'tool-call-delta' ? decodeToolArgument(text, state.esc) : undefined
-    const countText = esc !== undefined ? esc.text : text
-    const { added, inc } =
-      countText.length > 0 ? countDeltaTokens(countText, spec, state.inc) : { added: 0, inc: state.inc }
-    return slideWindow(
-      {
-        samples: [...state.samples, { time: event.time, tokens: added + nameTokens }],
-        totalTokens: state.totalTokens + added + nameTokens,
-        currentRate: state.currentRate,
-        inc,
-        esc: esc !== undefined ? esc.esc : state.esc,
-        nameCountedIds,
-      },
-      event.time,
-      spec,
-    )
+  if (event.type === 'assistant/chunk') {
+    return foldThroughputDelta(state, event.data.chunk, event.time, spec)
+  }
+  if (event.type === 'assistant/message') {
+    const message = event.data as { stream?: readonly unknown[] }
+    if (!Array.isArray(message.stream)) return state
+    let next = state
+    for (const item of expandCompactStream(message.stream)) next = foldThroughputDelta(next, item.chunk, item.time, spec)
+    return next
   }
   return state
 }
@@ -470,6 +545,7 @@ export function createLiveTokenStatsDefinition(
     // 仅当序列化状态字段或折叠语义变化时才递增。
     // v4：tool-call 参数反转义，esc 状态——官方按解码后内容计费。
     // v5：tool-call name 按调用 id 去重只计一次——DSH 的 llm/stream 对同一调用的每个 delta 帧都携带 name。
-    stateVersion: 5,
+    // v6：dsh 0.1.5-rc.2 的 v2 事件模型把流式增量打包进 assistant/message.stream，改从该字段折算。
+    stateVersion: 6,
   }
 }
