@@ -113,7 +113,7 @@ async function callSnapshot(sessionId: string): Promise<LiveRateSnapshot | null>
 /**
  * 实时快照拉取：向主机 `/dsh-live-token-stats` 通道轮询本会话数据。
  * 主机在每次轮询时按当下时刻计算速率，因此流停顿期间数值也在移动，无需本地计时。
- * 有活跃 step 时约 10 Hz，空闲只留 5 秒一次的兜底探测，基本不产生空转流量。
+ * 模型生成中约 10 Hz，step 仍在但生成已停的工具阶段降到约 2 Hz，空闲只留 5 秒一次的兜底探测，基本不产生空转流量。
  * dsh 0.1.5-rc.2 起会话投影不再有实时增量，投影的 active 只用来判断 step 是否在跑，实时数值仍取自快照。
  */
 function useLiveSnapshot(
@@ -130,7 +130,12 @@ function useLiveSnapshot(
         const data = await callSnapshot(sessionId)
         if (disposed) return
         setLive(data)
-        if (data?.generating === true) delayMs = 100
+        if (data?.generating === true) {
+          delayMs = 100
+        } else if (active) {
+          // step 仍在但生成已停，例如工具执行阶段，降到 500ms 减少空转。
+          delayMs = 500
+        }
       } catch {
         if (disposed) return
         setLive(null)
@@ -193,7 +198,7 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
     const out = liveSnap?.outputTokens ?? 0
     groups.push(`实时输出 ${liveSnap?.exact === true ? '' : '~'}${formatInt(out)} token`)
     // 平均速度：本 step 自请求发出起的全程平均，分母含首字延迟与一切停顿，与窗口化的实时速度并列对照，可看出推流在加速还是减速。
-    if (liveSnap?.avgTokensPerSecond !== undefined) groups.push(`平均速度 ~${formatTps(liveSnap.avgTokensPerSecond)} tok/s`)
+    if (liveSnap?.avgTokensPerSecond !== undefined) groups.push(`平均速度 ${liveSnap.exact === true ? '' : '~'}${formatTps(liveSnap.avgTokensPerSecond)} tok/s`)
     groups.push(`首字延迟 ${formatDuration(firstTokenDelay)}`)
   } else if (waiting) {
     // 状态二：等待首字，尚无 token，无实时速度与实时输出。结算读数保持为对照基线。

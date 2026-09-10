@@ -7,7 +7,7 @@
  * 于是本模块打开自己的纯插件通道，不改 DSH 源码，因此可在任何环境安装分发：
  *
  *   host：  `ctx.on('llm/stream', ...)` 拦截原始逐块 adapter 流，正是官方不变量包装的同一条瀑布流。对每个 text / reasoning / tool-call 参数片段，按会话 `options.sessionId` 累计一个滑动窗口 token 速率。
- *   host：  `ctx.connection.rpc.handle('/dsh-live-token-stats', ...)` 提供每个会话最新的实时快照。
+ *   host：  经 `mountRpcChannel` 自注册 `/dsh-live-token-stats` 前缀路由，提供每个会话最新的实时快照。
  *   client：每秒轮询该 RPC 端点数次并渲染。
  *
  * 这是可分发插件能达到的「基线式近实时」：RPC 拉取限速在约 4/s。
@@ -35,6 +35,7 @@ import {
 } from './tokenizer/incremental.ts'
 import { EMPTY_UNESCAPE, unescapeFeed, type UnescapeState } from './tokenizer/unescape.ts'
 import { mountRpcChannel } from './rpc-channel.ts'
+import { setCompactStreamDebug } from './projection.ts'
 
 /**
  * 单个工具调用名的 token 数，BPE 或 density 按 spec 计价。
@@ -380,6 +381,8 @@ export function installHostLiveStream(
   debug = false,
 ): { tracker: LiveTokenRateTracker; dispose: () => void } {
   const tracker = new LiveTokenRateTracker(spec)
+  // 投影里的紧凑流展开沿用同一个 debug 开关，上游改记录格式时能在日志里看到。
+  setCompactStreamDebug(debug)
 
   // 前插：让我们先于不变量校验器看到 chunk，无论顺序都无害。
   const streamSeq = new Map<string, number>()

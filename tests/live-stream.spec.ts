@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest'
 import { LiveTokenRateTracker } from '../src/live-stream.ts'
 import { ESTIMATOR_DEFAULTS, type EstimatorSpec } from '../src/estimator.ts'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { CallId } from '@deepseek-ai/dsh-llm/brand'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 
 const SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'density' }
 const BPE_SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'bpe' }
@@ -20,7 +20,7 @@ function textDelta(text: string): StreamChunk {
 }
 
 function toolCallDelta(argumentsDelta: string): StreamChunk {
-  return { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write', argumentsDelta }
+  return { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), name: 'write', argumentsDelta }
 }
 
 /** density 模式：33 个 ASCII ≈ 10 token。 */
@@ -42,7 +42,7 @@ describe('LiveTokenRateTracker', () => {
   it('忽略非 delta 块与空 delta', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.fold(SESSION, { type: 'block-start', index: 0, blockType: 'text' }, 1000)
-    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId(''), argumentsDelta: '' }, 1000)
+    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: ToolCallId(''), argumentsDelta: '' }, 1000)
     expect(t.snapshot(SESSION, 10000).tokensPerSecond).toBeUndefined()
   })
 
@@ -152,6 +152,25 @@ describe('LiveTokenRateTracker', () => {
     expect(t.snapshot(SESSION, 10200).stallMs).toBe(0)
   })
 
+  it('usage 前后 snapshot 的 outputTokens、首字延迟与平均速度', () => {
+    const t = new LiveTokenRateTracker(SPEC)
+    t.beginStep(SESSION, 1000)
+    t.fold(SESSION, tenTokenFrame(), 1200)
+    const before = t.snapshot(SESSION, 2200)
+    // usage 未到：输出是估算，exact 为假，首字延迟 200ms，平均速度 = 估算 10 token / 1.2s
+    expect(before.outputTokens).toBe(10)
+    expect(before.exact).toBe(false)
+    expect(before.firstTokenDelayMs).toBe(200)
+    expect(before.avgTokensPerSecond).toBeCloseTo(10 / 1.2, 5)
+    // usage 到达：输出切换为官方实际值，首字延迟不变，平均速度按实际值重算
+    t.fold(SESSION, { type: 'usage', usage: { inputTokens: 0, outputTokens: 25 } } as unknown as StreamChunk, 2300)
+    const after = t.snapshot(SESSION, 2300)
+    expect(after.outputTokens).toBe(25)
+    expect(after.exact).toBe(true)
+    expect(after.firstTokenDelayMs).toBe(200)
+    expect(after.avgTokensPerSecond).toBeCloseTo(25 / 1.3, 5)
+  })
+
   it('snapshot 暴露 generating：流结束前为真，endStep 后为假', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.beginStep(SESSION, 1000)
@@ -243,7 +262,7 @@ describe('LiveTokenRateTracker', () => {
 
   it('BPE 模式：tool-call 首帧携带的 name 计入输出', () => {
     const t = new LiveTokenRateTracker(BPE_SPEC)
-    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write_file', argumentsDelta: '' }, 1000)
+    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), name: 'write_file', argumentsDelta: '' }, 1000)
     const snap = t.snapshot(SESSION, 1000)
     expect(snap.tokensPerSecond).toBeDefined()
     expect(snap.tokensPerSecond!).toBeGreaterThan(0)
@@ -252,8 +271,8 @@ describe('LiveTokenRateTracker', () => {
   it('BPE 模式：同一调用每帧都带 name 时只计一次，不重复累加', () => {
     const t = new LiveTokenRateTracker(BPE_SPEC)
     // DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name，官方只按一次计费。
-    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write', argumentsDelta: '{"a":' }, 1000)
-    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write', argumentsDelta: '1}' }, 1100)
+    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), name: 'write', argumentsDelta: '{"a":' }, 1000)
+    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), name: 'write', argumentsDelta: '1}' }, 1100)
     // 全部样本合计 = 解码后参数 token + 一次 name；若重复累加会多出 tokenCount('write')。
     const snap = t.snapshot(SESSION, 1110)
     expect(snap.tokensPerSecond).toBeDefined()
@@ -264,8 +283,8 @@ describe('LiveTokenRateTracker', () => {
 
   it('BPE 模式：同轮多个同名调用各计一次 name', () => {
     const t = new LiveTokenRateTracker(BPE_SPEC)
-    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: CallId('call-1'), name: 'write', argumentsDelta: '{"a":1}' }, 1000)
-    t.fold(SESSION, { type: 'tool-call-delta', index: 1, id: CallId('call-2'), name: 'write', argumentsDelta: '{"b":2}' }, 1100)
+    t.fold(SESSION, { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), name: 'write', argumentsDelta: '{"a":1}' }, 1000)
+    t.fold(SESSION, { type: 'tool-call-delta', index: 1, id: ToolCallId('call-2'), name: 'write', argumentsDelta: '{"b":2}' }, 1100)
     const snap = t.snapshot(SESSION, 1110)
     expect(snap.tokensPerSecond).toBeDefined()
     expect(snap.tokensPerSecond!).toBeGreaterThan(0)

@@ -2,9 +2,13 @@
  * 在 webServer 上自注册一条 connection 风格的 RPC 通道。
  *
  * dsh 0.1.5 的 connection.rpc.handle 会在登记路由时解析 webServer，实测任何插件上下文都抛
- * `cannot get property "webServer" without inject`，官方自身也从不走该路径。
+ * `cannot get property "webServer" without inject`；官方发行包内没有 handle 的调用点，dsh-api-gateway 用的是 rpc.intercept。
  * 因此这里直接向 webServer 注册 prefix 路由，复用 connection.requestRejection 的
  * Host 校验与浏览器鉴权，并实现同样的 client-request/server-response 信封。
+ *
+ * 本文件与 better-er/dsh-classic-coding 的 src/rpc-channel.ts 同源，鉴权与信封逻辑逐字一致，此处源自该仓库。
+ * 改动任一侧的鉴权、端点解析或信封语义时，必须同步另一侧。
+ * 已知差异：上游额外做 content-type 白名单与 content-length 预检，请求体上限为 300MiB；本插件载荷只有 snapshot 信封，保留 8MiB 上限。
  *
  * @module dsh-live-token-stats/rpc-channel
  */
@@ -57,7 +61,7 @@ const MAX_BODY_BYTES = 8 * 1024 * 1024
 /**
  * 挂载一条 RPC 通道。webServer 或 connection 缺席时不挂载，其余功能不受影响。
  * @param ctx - 插件上下文。
- * @param channel - 绝对通道前缀，例如 /dsh-pause。
+ * @param channel - 绝对通道前缀，例如 /dsh-live-token-stats。
  * @param handler - 端点处理器。
  */
 export function mountRpcChannel(ctx: Injectable, channel: string, handler: RpcChannelHandler): void {
@@ -128,11 +132,17 @@ async function serve(
       error: { code: 'gateway/bad-request', message: `method ${JSON.stringify(message.method)} does not match endpoint ${JSON.stringify(endpoint)}`, details: {} },
     })
   }
+  // 客户端断开即取消，等价官方 bridge 传 request.signal 的语义。
+  const controller = new AbortController()
+  const onClose = (): void => { controller.abort(new Error('client disconnected')) }
+  res.on('close', onClose)
   let result: RpcChannelResult
   try {
-    result = await handler(endpoint, message.payload, new AbortController().signal)
+    result = await handler(endpoint, message.payload, controller.signal)
   } catch (error) {
     result = { ok: false, error: { code: 'internal', message: error instanceof Error ? error.message : String(error), details: {} } }
+  } finally {
+    res.off('close', onClose)
   }
   reply(res, rpcId, result)
 }

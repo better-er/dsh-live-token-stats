@@ -4,7 +4,7 @@
  * `/dsh-live-token-stats` 通道 POST，复用官方 client-request/server-response 信封，
  * 由 `llm/stream` 瀑布流拦截喂养，即原始逐块 adapter 流含 tool-call 参数片段。
  *
- * 刻意不经 `ctx.connection.rpc`：该调用器在 0.1.5-rc.2 下取不到，直接打通道与 dsh-classic-coding 的做法一致。
+ * 刻意不经 `ctx.connection.rpc`：本插件客户端曾取不到该调用器，失败原因未定位，为规避改用直连打通道，与 dsh-classic-coding 的做法一致。
  *
  * @module dsh-live-token-stats/client
  */
