@@ -35,7 +35,7 @@ import {
 } from './tokenizer/incremental.ts'
 import { EMPTY_UNESCAPE, unescapeFeed, type UnescapeState } from './tokenizer/unescape.ts'
 import { mountRpcChannel } from './rpc-channel.ts'
-import { setCompactStreamDebug } from './projection.ts'
+import { setCompactStreamDebug, setLosslessAssertions } from './projection.ts'
 
 /**
  * 单个工具调用名的 token 数，BPE 或 density 按 spec 计价。
@@ -383,6 +383,9 @@ export function installHostLiveStream(
   const tracker = new LiveTokenRateTracker(spec)
   // 投影里的紧凑流展开沿用同一个 debug 开关，上游改记录格式时能在日志里看到。
   setCompactStreamDebug(debug)
+  // 同一开关下顺带打开投影状态的无损 JSON 自检：只告警不抛错，
+  // 因为折叠跑在事件回放路径上，抛错会让整个投影单元失效。违规路径会带字段名打进日志。
+  setLosslessAssertions(debug ? 'warn' : 'off')
 
   // 前插：让我们先于不变量校验器看到 chunk，无论顺序都无害。
   const streamSeq = new Map<string, number>()
