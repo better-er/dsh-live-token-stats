@@ -85,7 +85,12 @@
     "lib/client.js",
     "lib/index.d.ts",
     "cordis.patch.yml",
+    "dsh.plugin.json",
     "README.md"
   ],
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.1.5-rc.2 <0.2.0-0"
+  },
   "license": "MIT"
 }

@@ -1,0 +1,22 @@
+{
+  "id": "dsh-live-token-stats",
+  "name": "dsh-live-token-stats",
+  "version": "0.4.3",
+  "description": {
+    "en": "Live token stats band for DeepSeek Harness: tokenises the model's streaming output with the bundled official DeepSeek V4 BPE table and renders stream TPS, output tokens, stall time and time-to-first-token under the composer, then reconciles the estimate against the provider usage once the step settles. Pure plugin, no DSH source changes.",
+    "zh": "DeepSeek Harness 的实时 token 状态带：用内置的 DeepSeek 官方 V4 BPE 分词表对模型流式输出实时分词，在 composer 下方渲染流式 TPS、输出 token、已停顿时长与首字延迟，step 结算后再把估算与官方 usage 对账。纯插件自包含，不改 DSH 源码。"
+  },
+  "homepage": "https://github.com/better-er/dsh-live-token-stats",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/better-er/dsh-live-token-stats.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "dsh": ">=0.1.5-rc.2"
+  },
+  "components": {
+    "host": "lib/index.js",
+    "client": "lib/client.js"
+  }
+}

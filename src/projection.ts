@@ -14,6 +14,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { estimateTextTokens, type EstimatorSpec } from './estimator.ts'
 import { tokenCount } from './tokenizer/bpe.ts'
+import { assertLosslessJson, omitUndefined } from './compact.ts'
 import {
   EMPTY_INCREMENTAL,
   incrementalFeed,
@@ -21,6 +22,9 @@ import {
   type IncrementalState,
 } from './tokenizer/incremental.ts'
 import { EMPTY_UNESCAPE, unescapeFeed, type UnescapeState } from './tokenizer/unescape.ts'
+
+// 无损 JSON 边界的自检开关与投影折叠同属一条纪律，从投影出口再导一次，调用方不必知道 compact 模块。
+export { setLosslessAssertions } from './compact.ts'
 
 /** 在会话投影映射表里声明我们的 key，可合并扩展。 */
 declare module '@deepseek-ai/dsh-session-projection/types' {
@@ -243,6 +247,29 @@ const ACTIVE_INIT: ActiveStepState = {
   nameCountedIds: [],
 }
 
+/**
+ * 把活跃步骤冻结成 lastSettled。
+ *
+ * 被 kill 或中断的 step 可能一辈子没收到 usage，此刻 `active.actualTokens` 是 `undefined`。
+ * 该键必须「缺席」而不是「持有 undefined」：投影状态要过无损 JSON 边界，
+ * 见 ./compact.ts。客户端用 `!== undefined` 判定有无实际值，所以也不能改写成 null。
+ * @param active - 即将结算的活跃步骤。
+ * @param endTime - 结算墙钟时间，单位为 epoch 毫秒。
+ * @returns 可持久化的结算切片。
+ */
+function settleStep(active: LiveStepFacts, endTime: number): LiveTokenStatsProjection['lastSettled'] {
+  return omitUndefined({
+    turn: active.turn,
+    step: active.step,
+    startTime: active.startTime,
+    firstTokenTime: active.firstTokenTime,
+    estimatedTokens: active.estimatedTokens,
+    actualTokens: active.actualTokens,
+    exact: active.exact,
+    endTime,
+  })
+}
+
 /** 活跃步骤指标单元的纯折叠。 */
 export function activeStepApply(
   state: ActiveStepState,
@@ -311,16 +338,7 @@ export function activeStepApply(
         esc: { ...EMPTY_UNESCAPE },
         nameCountedIds: [],
         active: null,
-        lastSettled: {
-          turn: data.turn,
-          step: data.step,
-          startTime: state.active.startTime,
-          firstTokenTime: state.active.firstTokenTime,
-          estimatedTokens: state.active.estimatedTokens,
-          actualTokens: state.active.actualTokens,
-          exact: state.active.exact,
-          endTime: event.time,
-        },
+        lastSettled: settleStep(state.active, event.time),
       }
     }
     return state
@@ -334,9 +352,12 @@ export function activeStepApply(
   return state
 }
 
-/** 活跃步骤指标的视图切片。 */
+/** 活跃步骤指标的视图切片。出口同样过一遍无损边界，防止历史状态里的 undefined 再被转发出去。 */
 export function activeStepView(state: ActiveStepState): Pick<LiveTokenStatsProjection, 'active' | 'lastSettled'> {
-  return { active: state.active, lastSettled: state.lastSettled }
+  return {
+    active: state.active === null ? null : omitUndefined(state.active),
+    lastSettled: state.lastSettled === null ? null : omitUndefined(state.lastSettled),
+  }
 }
 
 // --- Projection container ---------------------------------------------------
@@ -422,7 +443,9 @@ export function createLiveTokenStatsDefinition(
     apply: (state, event) => {
       const nextActive = activeStepApply(state.activeStep, event, spec)
       if (nextActive === state.activeStep) return state
-      return { activeStep: nextActive }
+      const next: LiveTokenStatsState = { activeStep: nextActive }
+      assertLosslessJson(next, 'liveTokenStats')
+      return next
     },
     wire: {
       viewSchema,
