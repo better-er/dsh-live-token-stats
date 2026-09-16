@@ -2,7 +2,7 @@
  * tokenizer 模块单测：黄金对照、增量一致性、模块行为。
  * 黄金对照即与 transformers 逐 token id 比对，含 added tokens 特殊匹配用例。
  *
- * 黄金数据由 deepseek_v3_tokenizer/scripts/export_fixtures.py 生成，基于 DeepSeek V4-Flash tokenizer，其词表与 V3 逐字节相同。
+ * 黄金数据取自 DeepSeek V4-Flash tokenizer 的逐 token id 对照。
  */
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
@@ -12,7 +12,7 @@ import { EMPTY_INCREMENTAL, incrementalFeed, incrementalTotal } from '../src/tok
 
 interface GoldenCase { name: string; text: string; ids: number[] }
 const golden: GoldenCase[] = JSON.parse(
-  readFileSync(new URL('./fixtures/dsv3-golden.json', import.meta.url), 'utf-8'),
+  readFileSync(new URL('./fixtures/dsv4-golden.json', import.meta.url), 'utf-8'),
 )
 
 describe('字节映射', () => {

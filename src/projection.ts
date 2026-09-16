@@ -1,9 +1,11 @@
 /**
- * `liveTokenStats` 会话投影：可重放的实时与时间性 token 数据，覆盖官方投影未涉及的部分，即流式 TPS、实时输出估算与在途 TTFT 计时。
+ * `liveTokenStats` 会话投影：只记录 step 的时间线与官方 usage，不做分词、不持有原文。
  *
- * 折叠按指标单元 METRIC UNIT 拆分，每个单元只负责一件关注点并导出极小的 reducer 接口，
- * 之后新增 token 指标只需加一个单元加一个视图切片，而不用碰庞大的折叠。
- * 状态保持纯 JSON，这是持久化缓存的前提。
+ * 结算估算原本由投影在重放时逐帧算，冷读长会话要对每条历史 step 重扫 BPE。
+ * 现在改由 host 在需要时对最后一条 `assistant/message` 算一次，见 settle.ts 与 live-stream.ts，
+ * 投影只提供客户端判断 step 是否在跑，以及首字与结算时间戳。
+ *
+ * 状态保持纯 JSON，体积只有时间戳与几个数字，可安全持久化。
  *
  * @module dsh-live-token-stats/projection
  */
@@ -11,16 +13,7 @@
 import { z } from 'zod'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
-import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { estimateTextTokens, type EstimatorSpec } from './estimator.ts'
-import { tokenCount } from './tokenizer/bpe.ts'
-import {
-  EMPTY_INCREMENTAL,
-  incrementalFeed,
-  incrementalTotal,
-  type IncrementalState,
-} from './tokenizer/incremental.ts'
-import { EMPTY_UNESCAPE, unescapeFeed, type UnescapeState } from './tokenizer/unescape.ts'
+import { expandCompactStream, isDeltaChunk } from './settle.ts'
 
 /** 在会话投影映射表里声明我们的 key，可合并扩展。 */
 declare module '@deepseek-ai/dsh-session-projection/types' {
@@ -34,8 +27,7 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
   }
 }
 
-/** 一步的 token 数据，含实时启发式估算以及官方 usage 落地后的实际值。
- * 两者都保留，以便步骤结束后展示估算值与实际值的结算偏差。 */
+/** 一步的 token 时间线，输出估算由 host 单独提供，投影不持有。 */
 export interface LiveStepFacts {
   turn: number
   step: number
@@ -43,8 +35,6 @@ export interface LiveStepFacts {
   startTime: number
   /** 首 token 墙钟时间，单位为 epoch 毫秒，首字到来前为 null。 */
   firstTokenTime: number | null
-  /** 实时输出 token 启发式估算，逐 delta 累加。 */
-  estimatedTokens: number
   /** 官方上报的输出 token 数，usage 落地后才有值。 */
   actualTokens?: number
   /** 官方 usage 是否已上报。 */
@@ -69,200 +59,30 @@ export interface LiveTokenStatsState {
 export interface ActiveStepState {
   active: LiveTokenStatsProjection['active']
   lastSettled: LiveTokenStatsProjection['lastSettled']
-  /** BPE 增量切分状态，纯 JSON，density 模式保持初始态不增长。 */
-  inc: IncrementalState
-  /** tool-call 参数反转义状态，即跨 delta 帧的悬空尾部，纯 JSON 可重放。 */
-  esc: UnescapeState
-  /** 已计入 name token 的工具调用 id，同一调用跨帧只计一次，纯 JSON 可重放。 */
-  nameCountedIds: string[]
 }
 
-/** delta 文本计数：bpe 走增量 BPE 切分，与官方口径一致，density 走双密度盲估。 */
-function countDeltaTokens(
-  text: string,
-  spec: Readonly<EstimatorSpec>,
-  inc: IncrementalState,
-): { added: number; inc: IncrementalState } {
-  if (spec.tokenizerMode === 'bpe') {
-    // 阈值口径：取 total 的增量，含尾段中尚未定界的 token——
-    // 连续中文无段边界时会全部滞留在尾段，added 已结算恒 0，不适用。
-    const r = incrementalFeed(inc, text)
-    const delta = incrementalTotal(r.state) - incrementalTotal(inc)
-    return { added: delta, inc: r.state }
-  }
-  return { added: estimateTextTokens(text, spec), inc }
+/** 设置首字时间，仅在尚未记录时生效。 */
+function withFirstToken(active: LiveStepFacts, time: number): LiveStepFacts {
+  return active.firstTokenTime === null ? { ...active, firstTokenTime: time } : active
 }
 
-/** 判定一个 chunk 是否为携带 token 的增量。 */
-function isDeltaChunk(chunk: StreamChunk): chunk is Extract<StreamChunk, { type: 'text-delta' | 'reasoning-delta' | 'tool-call-delta' }> {
-  return chunk.type === 'text-delta'
-    || chunk.type === 'reasoning-delta'
-    || chunk.type === 'tool-call-delta'
-}
-
-/** 一个增量 chunk 携带 token 的文本，无 token 时为空串。 */
-function deltaText(chunk: StreamChunk): string {
-  if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') return chunk.text
-  if (chunk.type === 'tool-call-delta') return chunk.argumentsDelta
-  return ''
-}
+const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null }
 
 /**
- * 反转义工具参数。
- * 官方按「解码后的实际内容」给 tool-call 参数计费，本地 delta 是 JSON 转义原文，如 `\n` 两字符等，按原文 BPE 会系统性高估，见 DESIGN §10.6。
- * 返回 { 文本, esc }，解码后的文本供计数，esc 状态挂到 fold 状态里跨帧。
+ * 活跃步骤指标单元的纯折叠。
+ * 只维护时间戳与官方 usage，不解析文本、不持有原文；输出估算由 host 另行提供。
  */
-function decodeToolArgument(
-  text: string,
-  esc: UnescapeState,
-): { text: string; esc: UnescapeState } {
-  if (text.length === 0) return { text, esc }
-  const r = unescapeFeed(esc, text)
-  return { text: r.text, esc: r.state }
-}
-
-/**
- * 单个工具调用名的 token 数，BPE 或 density 按 spec 计价。
- * 官方会把模型生成的 tool-call JSON 完整计入 output，其中 `name` 字段是模型生成内容，本地可拿到。
- * 注意：DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name 字段，官方只按一次计费，
- * 调用方必须按工具调用 id 去重，仅在首次出现时计入，否则 name 会被重复累加。
- * 这里只负责算 name 本身，去重由调用方维护。
- * `argumentsDelta` 已由 deltaText 计入，消息外壳与模板结构费不补偿，见 DESIGN §10.x。
- */
-function toolNameTokenCount(name: string, spec: Readonly<EstimatorSpec>): number {
-  return spec.tokenizerMode === 'bpe' ? tokenCount(name) : estimateTextTokens(name, spec)
-}
-
-/**
- * 展开 dsh 0.1.5-rc.2 的紧凑流记录为带原始时间的 delta 序列，等价官方 expandAssistantStream。
- * 流式增量不再逐块进会话事件，而是打包在 assistant/message.stream 里随结算一次到达。
- * 未知或残缺记录一律跳过，避免一条坏记录让整个投影单元失效；官方对未知记录直接抛错，这里在 debug 开启时告警，上游改格式时能被看见。
- */
-let compactStreamDebugEnabled = false
-
-/** 打开或关闭紧凑流未知记录的告警，由主机按插件 debug 配置调用。 */
-export function setCompactStreamDebug(enabled: boolean): void {
-  compactStreamDebugEnabled = enabled
-}
-
-/** 记录一条被跳过的紧凑流记录，仅在 debug 开启时告警。 */
-function warnSkippedRecord(reason: string, record: unknown): void {
-  if (!compactStreamDebugEnabled) return
-  console.warn(`[dsh-live-token-stats] 跳过紧凑流记录：${reason}`, record)
-}
-
-function expandCompactStream(stream: readonly unknown[]): { time: number; chunk: StreamChunk }[] {
-  const out: { time: number; chunk: StreamChunk }[] = []
-  for (const raw of stream) {
-    if (typeof raw !== 'object' || raw === null) {
-      warnSkippedRecord('记录不是对象', raw)
-      continue
-    }
-    const record = raw as Record<string, unknown>
-    const type = record.type
-    if (type === 'chunk') {
-      const chunk = record.chunk as StreamChunk | undefined
-      if (chunk === undefined) {
-        warnSkippedRecord('chunk 记录缺少 chunk 字段', raw)
-        continue
-      }
-      out.push({ time: typeof record.time === 'number' ? record.time : 0, chunk })
-      continue
-    }
-    const members = type === 'tool-call-chunks'
-      ? record.args
-      : type === 'text-chunks' || type === 'reasoning-chunks' ? record.texts : undefined
-    if (!Array.isArray(members)) {
-      warnSkippedRecord(`无法识别的记录类型 ${JSON.stringify(type)}`, raw)
-      continue
-    }
-    const dt = Array.isArray(record.dt) ? record.dt as number[] : []
-    const index = typeof record.index === 'number' ? record.index : 0
-    let time = typeof record.time0 === 'number' ? record.time0 : 0
-    for (let member = 0; member < members.length; member += 1) {
-      if (member > 0) time += dt[member - 1] ?? 0
-      const text = typeof members[member] === 'string' ? members[member] as string : ''
-      let chunk: StreamChunk
-      if (type === 'text-chunks') chunk = { type: 'text-delta', index, text }
-      else if (type === 'reasoning-chunks') chunk = { type: 'reasoning-delta', index, text }
-      else chunk = {
-        type: 'tool-call-delta',
-        index,
-        id: String(record.id ?? ''),
-        ...(typeof record.name === 'string' ? { name: record.name } : {}),
-        argumentsDelta: text,
-      } as unknown as StreamChunk
-      out.push({ time, chunk })
-    }
-  }
-  return out
-}
-
-/** 把一个 delta 折叠进活跃步骤，工具名按调用 id 去重只计一次。 */
-function foldActiveDelta(
-  state: ActiveStepState,
-  chunk: StreamChunk,
-  time: number,
-  spec: Readonly<EstimatorSpec>,
-): ActiveStepState {
-  const active = state.active
-  if (active === null || active.exact || !isDeltaChunk(chunk)) return state
-  const text = deltaText(chunk)
-  let nameTokens = 0
-  let nameCountedIds = state.nameCountedIds
-  if (chunk.type === 'tool-call-delta') {
-    const name = chunk.name
-    if (typeof name === 'string' && name.length > 0 && !nameCountedIds.includes(chunk.id)) {
-      nameTokens = toolNameTokenCount(name, spec)
-      nameCountedIds = [...nameCountedIds, chunk.id]
-    }
-  }
-  if (text.length === 0 && nameTokens === 0) return state
-  const esc = chunk.type === 'tool-call-delta' ? decodeToolArgument(text, state.esc) : undefined
-  const countText = esc !== undefined ? esc.text : text
-  const { added, inc } =
-    countText.length > 0 ? countDeltaTokens(countText, spec, state.inc) : { added: 0, inc: state.inc }
-  return {
-    ...state,
-    inc,
-    nameCountedIds,
-    ...(esc !== undefined ? { esc: esc.esc } : {}),
-    active: {
-      ...active,
-      firstTokenTime: active.firstTokenTime === null ? time : active.firstTokenTime,
-      estimatedTokens: active.estimatedTokens + added + nameTokens,
-    },
-  }
-}
-
-const ACTIVE_INIT: ActiveStepState = {
-  active: null,
-  lastSettled: null,
-  inc: { ...EMPTY_INCREMENTAL },
-  esc: { ...EMPTY_UNESCAPE },
-  nameCountedIds: [],
-}
-
-/** 活跃步骤指标单元的纯折叠。 */
-export function activeStepApply(
-  state: ActiveStepState,
-  event: SessionEvent,
-  spec: Readonly<EstimatorSpec>,
-): ActiveStepState {
+export function activeStepApply(state: ActiveStepState, event: SessionEvent): ActiveStepState {
   const { type, data } = event
 
   if (type === 'step/start') {
     return {
       ...state,
-      inc: { ...EMPTY_INCREMENTAL },
-      esc: { ...EMPTY_UNESCAPE },
-      nameCountedIds: [],
       active: {
         turn: data.turn,
         step: data.step,
         startTime: event.time,
         firstTokenTime: null,
-        estimatedTokens: 0,
         exact: false,
       },
     }
@@ -270,35 +90,26 @@ export function activeStepApply(
 
   if (state.active === null) return state
 
-  // 兼容 dsh 0.1.5-rc.1 及更早的已发布 v1 日志，v2 起不再产生该事件；
-  // 0.1.5-rc.2 的 SessionEvent 联合类型已移除 assistant/chunk，这里按原始形状判定。
-  const legacy = event as unknown as { type?: unknown; data?: { chunk?: StreamChunk } }
-  if (legacy.type === 'assistant/chunk') {
-    const chunk = legacy.data?.chunk
-    if (chunk === undefined) return state
-    if (chunk.type === 'usage' && chunk.usage && typeof chunk.usage.outputTokens === 'number') {
-      // 官方 usage：记住实际值，估算保持不动，便于之后推导结算偏差。
-      return { ...state, active: { ...state.active, actualTokens: chunk.usage.outputTokens, exact: true } }
-    }
-    return foldActiveDelta(state, chunk, event.time, spec)
-  }
-
   if (type === 'assistant/message') {
-    // v2 事件模型把本 step 的紧凑流随结算一次送到，展开折叠出估算与实际值，
-    // 结算读数因此仍然成立，实时部分改由 llm/stream 快照负责。
+    // v2 事件模型把本 step 的紧凑流随结算一次送到，这里只取首个增量时间与官方 usage。
     const message = data as { stream?: readonly unknown[]; usage?: { outputTokens?: number } }
     let next = state
     if (Array.isArray(message.stream)) {
       for (const item of expandCompactStream(message.stream)) {
-        if (item.chunk.type === 'usage' && item.chunk.usage && typeof item.chunk.usage.outputTokens === 'number') {
-          if (next.active !== null) next = { ...next, active: { ...next.active, actualTokens: item.chunk.usage.outputTokens, exact: true } }
+        const chunk = item.chunk
+        if (chunk.type === 'usage' && chunk.usage && typeof chunk.usage.outputTokens === 'number') {
+          if (next.active !== null && !next.active.exact) {
+            next = { ...next, active: { ...next.active, actualTokens: chunk.usage.outputTokens, exact: true } }
+          }
           continue
         }
-        next = foldActiveDelta(next, item.chunk, item.time, spec)
+        if (next.active === null || next.active.exact || next.active.firstTokenTime !== null) continue
+        if (!isDeltaChunk(chunk)) continue
+        next = { ...next, active: withFirstToken(next.active, item.time) }
       }
     }
     const usage = message.usage
-    if (usage !== undefined && typeof usage.outputTokens === 'number' && next.active !== null) {
+    if (usage !== undefined && typeof usage.outputTokens === 'number' && next.active !== null && !next.active.exact) {
       next = { ...next, active: { ...next.active, actualTokens: usage.outputTokens, exact: true } }
     }
     return next
@@ -306,29 +117,14 @@ export function activeStepApply(
 
   if (type === 'step/end') {
     if (state.active.turn === data.turn && state.active.step === data.step) {
-      return {
-        inc: { ...EMPTY_INCREMENTAL },
-        esc: { ...EMPTY_UNESCAPE },
-        nameCountedIds: [],
-        active: null,
-        lastSettled: {
-          turn: data.turn,
-          step: data.step,
-          startTime: state.active.startTime,
-          firstTokenTime: state.active.firstTokenTime,
-          estimatedTokens: state.active.estimatedTokens,
-          actualTokens: state.active.actualTokens,
-          exact: state.active.exact,
-          endTime: event.time,
-        },
-      }
+      return { active: null, lastSettled: { ...state.active, endTime: event.time } }
     }
     return state
   }
 
-  // 未完成的 turn/end 会废弃其未结算的估算。
+  // 未完成的 turn/end 会废弃其未结算的时间线。
   if (type === 'turn/end' && data.reason && data.reason.kind !== 'completed') {
-    return { ...state, inc: { ...EMPTY_INCREMENTAL }, esc: { ...EMPTY_UNESCAPE }, nameCountedIds: [], active: null }
+    return { ...state, active: null }
   }
 
   return state
@@ -346,7 +142,6 @@ const activeSchema = z.object({
   step: z.number(),
   startTime: z.number(),
   firstTokenTime: z.number().nullable(),
-  estimatedTokens: z.number().nonnegative(),
   actualTokens: z.number().nonnegative().optional(),
   exact: z.boolean(),
 }).strict()
@@ -356,7 +151,6 @@ const lastSettledSchema = z.object({
   step: z.number(),
   startTime: z.number(),
   firstTokenTime: z.number().nullable(),
-  estimatedTokens: z.number().nonnegative(),
   actualTokens: z.number().nonnegative().optional(),
   exact: z.boolean(),
   endTime: z.number(),
@@ -367,24 +161,9 @@ const viewSchema = z.object({
   lastSettled: lastSettledSchema.nullable(),
 }).strict()
 
-const incSchema = z.object({
-  buffer: z.string(),
-  counted: z.number().nonnegative(),
-}).strict()
-
-/** tool-call 反转义的悬空尾部状态，纯 JSON，可重放。 */
-const escSchema = z.object({
-  tail: z.string(),
-}).strict()
-
-const idListSchema = z.array(z.string())
-
 const activeStepStateSchema = z.object({
   active: activeSchema.nullable(),
   lastSettled: lastSettledSchema.nullable(),
-  inc: incSchema,
-  esc: escSchema,
-  nameCountedIds: idListSchema,
 }).strict()
 
 /** 在用它播种一次缓存恢复前校验持久化的折叠状态。 */
@@ -409,18 +188,16 @@ export type LiveTokenStatsDefinition = Omit<
 
 /**
  * 创建可重放的 liveTokenStats 投影定义。
- * @param spec - 已解析的估算器 spec。
+ * 输出估算已由 host 单独提供，这里不需要估算器配置。
  * @returns 供 sessionProjections.register() 使用的投影定义。
  */
-export function createLiveTokenStatsDefinition(
-  spec: Readonly<EstimatorSpec>,
-): LiveTokenStatsDefinition {
+export function createLiveTokenStatsDefinition(): LiveTokenStatsDefinition {
   return {
     key: 'liveTokenStats',
     stateSchema,
     init,
     apply: (state, event) => {
-      const nextActive = activeStepApply(state.activeStep, event, spec)
+      const nextActive = activeStepApply(state.activeStep, event)
       if (nextActive === state.activeStep) return state
       return { activeStep: nextActive }
     },
@@ -433,6 +210,7 @@ export function createLiveTokenStatsDefinition(
     // v5：tool-call name 按调用 id 去重只计一次——DSH 的 llm/stream 对同一调用的每个 delta 帧都携带 name。
     // v6：dsh 0.1.5-rc.2 的 v2 事件模型把流式增量打包进 assistant/message.stream，改从该字段折算。
     // v7：移除无消费者的 tokensPerSecond，实时速度由主机 llm/stream 快照提供。
-    stateVersion: 7,
+    // v8：分词与原文整体移出投影，只留时间戳与官方 usage；结算估算由 host 对最后一条 assistant/message 算一次。
+    stateVersion: 8,
   }
 }

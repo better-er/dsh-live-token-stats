@@ -5,12 +5,10 @@ name: CI
 on:
   push:
     branches:
-      - master
       - main
   pull_request:
     # fork PR 也可触发；此工作流不读写仓库 secrets，fork 环境下安全。
     branches:
-      - master
       - main
 
 # 同一分支/PR 上排队的新提交会取消正在跑的旧任务，避免资源浪费。
@@ -22,12 +20,6 @@ jobs:
   check:
     name: typecheck · test · build
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        # 本地与线上主推的运行时；也覆盖 `engines` 未声明时的默认行为。
-        node:
-          - 22
-          - 26
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -35,12 +27,13 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          # 版本必须与 package.json 的 packageManager 完全一致，否则 action-setup 会报 Multiple versions of pnpm specified。
+          version: 9.15.9
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
+          node-version: 26.3.1
           cache: pnpm
 
       - name: Install dependencies
@@ -62,4 +55,5 @@ jobs:
           test -f lib/index.js
           test -f lib/client.js
           test -f lib/index.d.ts
-          echo "lib/ 产物齐全：index.js / client.js / index.d.ts"
+          test -f cordis.patch.yml
+          echo "构建产物齐全：lib/index.js · lib/client.js · lib/index.d.ts · cordis.patch.yml"

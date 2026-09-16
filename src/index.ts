@@ -2,7 +2,7 @@
  * dsh-live-token-stats 的主机端。
  *
  * 两个相互独立的部分：
- *  1. 可重放的 `liveTokenStats` 会话投影，官方 sessionProjections 注册表，提供结算后的输出估算与 TTFT 计时。
+ *  1. 可重放的 `liveTokenStats` 会话投影，官方 sessionProjections 注册表，提供每个 step 的时间线与官方 usage、TTFT 计时；输出估算由主机另行提供。
  *  2. 实时 token 速率的主机→客户端通道：`llm/stream` 瀑布流拦截把原始逐块 adapter 增量含 text、reasoning 与 tool-call 参数片段折叠成每个会话的滑动窗口速率，再经插件自有的 RPC 通道 `/dsh-live-token-stats` 提供给浏览器。
  *
  * 纯插件实现，不改 DSH 源码，可随处安装分发。
@@ -61,7 +61,7 @@ export function apply(ctx: Context, config: Config = {}): void {
 
   // 其一：可重放的结算投影，处理会话事件。
   ctx.inject(['sessionProjections'], (projectionCtx) => {
-    projectionCtx.sessionProjections.register(createLiveTokenStatsDefinition(spec))
+    projectionCtx.sessionProjections.register(createLiveTokenStatsDefinition())
   })
 
   // 其二：实时通道，拦截 llm/stream 并提供 RPC。

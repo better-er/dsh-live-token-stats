@@ -35,30 +35,17 @@ import {
 } from './tokenizer/incremental.ts'
 import { EMPTY_UNESCAPE, unescapeFeed, type UnescapeState } from './tokenizer/unescape.ts'
 import { mountRpcChannel } from './rpc-channel.ts'
-import { setCompactStreamDebug } from './projection.ts'
-
-/**
- * 单个工具调用名的 token 数，BPE 或 density 按 spec 计价。
- * 官方将模型生成的 tool-call JSON 完整计入 output，name 字段同为模型生成，此处补上 argumentsDelta 之外的缺口。
- * 注意：DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name 字段，官方只按一次计费，
- * 调用方必须按工具调用 id 去重，仅在首次出现时计入，否则 name 会被重复累加。
- * 消息外壳与模板结构费不补偿，见 DESIGN §10.x。
- */
-function toolNameTokenCount(name: string, spec: Readonly<EstimatorSpec>): number {
-  return spec.tokenizerMode === 'bpe' ? tokenCount(name) : estimateTextTokens(name, spec)
-}
-
-/** 一个增量 chunk 携带 token 的内容，无 token 时为空串。 */
-function deltaTextOf(chunk: StreamChunk): string {
-  if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') return chunk.text
-  if (chunk.type === 'tool-call-delta') return (chunk as { argumentsDelta?: string }).argumentsDelta ?? ''
-  return ''
-}
-
-/** 判定一个 chunk 是否贡献流式输出 token。 */
-function isTokenDelta(chunk: StreamChunk): boolean {
-  return chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta'
-}
+import type { SessionEvent, SessionId } from '@deepseek-ai/dsh-session'
+import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
+import {
+  deltaText,
+  estimateAssistantMessage,
+  findLastAssistantMessage,
+  isDeltaChunk,
+  setCompactStreamDebug,
+  toolNameTokenCount,
+  type SettledEstimate,
+} from './settle.ts'
 
 /**
  * 停顿判定阈值毫秒。
@@ -171,6 +158,8 @@ export interface LiveTokenSnapshot {
   elapsedMs?: number
   /** 本 step 全程平均速度 tok/s，含首字延迟与停顿。 */
   avgTokensPerSecond?: number
+  /** 最近一次结算步骤的本地整段估算与官方 usage，由 host 按需计算并缓存。 */
+  settledEstimate?: SettledEstimate
 }
 
 const INITIAL_RATE_CELL = (): RateCell => ({
@@ -209,8 +198,8 @@ export class LiveTokenRateTracker {
       usageCell.usageOutputTokens = chunk.usage.outputTokens
       return
     }
-    if (!isTokenDelta(chunk)) return
-    const text = deltaTextOf(chunk)
+    if (!isDeltaChunk(chunk)) return
+    const text = deltaText(chunk)
     // 工具名 token 每个调用只计一次：DSH 的 llm/stream 对同一工具调用的每个 delta 帧都携带 name，
     // 逐帧累加会把 name 重复计数，按工具调用 id 去重，仅首次出现计入。
     let nameTokens = 0
@@ -234,7 +223,7 @@ export class LiveTokenRateTracker {
       cell.stallMs += timeMs - cell.lastSampleAt
     }
     let tokensAdded = nameTokens
-    // 工具参数先反转义再计数：官方按解码后的实际内容计费，delta 是 JSON 转义原文，DESIGN §10.6，跨帧悬空尾部在 cell.esc 上。
+    // 工具参数先反转义再计数：官方按解码后的实际内容计费，delta 是 JSON 转义原文，跨帧悬空尾部在 cell.esc 上。
     let esc = cell.esc
     let countText = text
     if (chunk.type === 'tool-call-delta' && text.length > 0) {
@@ -349,14 +338,164 @@ export class LiveTokenRateTracker {
   }
 }
 
+/** 结算估算来源：按会话给出最后一条 assistant/message 的估算。 */
+export interface SettleSource {
+  get(sessionId: string, signal?: AbortSignal): Promise<SettledEstimate | undefined>
+}
+
+/**
+ * 取持久化服务，类型来自 @deepseek-ai/dsh-session-persistence 的 Context 声明合并。
+ * 该服务的公开面只有 create/open/flush/stat/list，没有 inspect；读日志必须走 open 的只读句柄。
+ */
+function persistenceOf(ctx: Context): SessionPersistence | undefined {
+  return ctx.get('sessionPersistence')
+}
+
+/**
+ * 按 id 从持久化读一次完整事件日志。
+ * 只读句柄不取写所有权，可与运行中的写句柄并存；句柄无论成败都必须显式关闭。
+ * @param ctx - 主机插件上下文。
+ * 有意不接收客户端 signal：读取结果按会话共享给并发轮询，绑上某一个请求的 signal 会让该请求断开后连带作废缓存。
+ * @param sessionId - 目标会话。
+ * @returns 该会话已持久化的全部事件。
+ */
+async function readStoredEvents(
+  ctx: Context,
+  sessionId: string,
+): Promise<readonly SessionEvent[]> {
+  const persistence = persistenceOf(ctx)
+  if (persistence === undefined) throw new Error('sessionPersistence 服务缺席，无法读取冷会话 ' + sessionId)
+  // 会话 id 在公开面是品牌化的 SessionId；这里是插件自带的字符串，断言即可，不引入运行时的品牌构造器。
+  const handle = await persistence.open(sessionId as SessionId, 'read')
+  try {
+    const result = await handle.read(undefined, undefined)
+    return result.events
+  } finally {
+    await handle.close()
+  }
+}
+
+/** 冷读失败后的退避起点毫秒，连续失败按 2 的幂翻倍。 */
+const COLD_BACKOFF_BASE_MS = 10_000
+/** 冷读失败退避的上限毫秒。 */
+const COLD_BACKOFF_MAX_MS = 300_000
+/** 按会话记账的缓存上限，超过后淘汰最早插入的会话，避免长驻会话不断累积。 */
+const MAX_TRACKED_SESSIONS = 32
+
+/** 把一张按会话记账的表控制在容量上限内，淘汰最早插入且不是当前会话的项。 */
+function trimTracked<T>(map: Map<string, T>, keep: string): void {
+  while (map.size > MAX_TRACKED_SESSIONS) {
+    const oldest = map.keys().next().value
+    if (oldest === undefined || oldest === keep) return
+    map.delete(oldest)
+  }
+}
+
+/** 判定错误是否为请求断开产生的 abort，这类错误不触发退避重试。 */
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError'
+}
+
+/** 把共享读取与本次请求的 signal 关联：请求断开时调用者立即返回，底层读取继续完成并留给后续轮询复用。 */
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return promise
+  if (signal.aborted) return Promise.reject(new DOMException('aborted', 'AbortError'))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new DOMException('aborted', 'AbortError'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    const settle = (): void => signal.removeEventListener('abort', onAbort)
+    promise.then(resolve, reject).then(settle, settle)
+  })
+}
+
+/**
+ * 结算估算读取器：对每个会话只对最后一条 assistant/message 算一次，按它的 seq 缓存。
+ * 活跃会话用 ctx.sessions 的同步快照，冷会话用 sessionPersistence 的只读句柄异步读一次；
+ * 因此冷读重放不再经过投影的逐帧分词，估算只在真正需要时算一次。
+ * 冷读成功结果按会话缓存，会话一旦重新出现在 ctx.sessions 就作废该缓存，避免移出 store 后再冷读命中旧日志。
+ * 冷读失败退避重试，避免空闲轮询对读不到的会话持续刷告警；三张按会话记账的表都设容量上限，超出后淘汰最早的会话。
+ * @param ctx - 主机插件上下文。
+ * @param spec - 已解析的估算器 spec。
+ * @returns 供 RPC 快照调用的读取器。
+ */
+export function createSettleSource(ctx: Context, spec: Readonly<EstimatorSpec>): SettleSource {
+  const cache = new Map<string, { asOfSeq: number; value: SettledEstimate }>()
+  const coldLoads = new Map<string, Promise<readonly SessionEvent[]>>()
+  const coldFailures = new Map<string, { count: number; until: number }>()
+
+  const estimateFrom = (sessionId: string, events: readonly SessionEvent[]): SettledEstimate | undefined => {
+    const found = findLastAssistantMessage(events)
+    if (found === undefined) return undefined
+    const hit = cache.get(sessionId)
+    if (hit !== undefined && hit.asOfSeq === found.seq) return hit.value
+    const value = estimateAssistantMessage(found.data, spec)
+    cache.set(sessionId, { asOfSeq: found.seq, value })
+    trimTracked(cache, sessionId)
+    return value
+  }
+
+  /** 记一次冷读失败，连续失败按 10 秒起步指数退避，上限 5 分钟。 */
+  const recordFailure = (sessionId: string): number => {
+    const count = (coldFailures.get(sessionId)?.count ?? 0) + 1
+    const delay = Math.min(COLD_BACKOFF_BASE_MS * 2 ** (count - 1), COLD_BACKOFF_MAX_MS)
+    coldFailures.set(sessionId, { count, until: Date.now() + delay })
+    trimTracked(coldFailures, sessionId)
+    return count
+  }
+
+  return {
+    async get(sessionId: string, signal?: AbortSignal): Promise<SettledEstimate | undefined> {
+      // 活跃会话的 Session 只有 snapshotEvents()/ownEvents()/eventAt()，没有 events 属性，这里取全量快照。
+      const live = ctx.get('sessions')?.get(sessionId as SessionId)
+      if (live !== undefined) {
+        // 会话转活跃即作废冷读缓存与退避：此后日志由快照给出，再被移出 store 时也必须重新读。
+        coldLoads.delete(sessionId)
+        coldFailures.delete(sessionId)
+        return estimateFrom(sessionId, live.snapshotEvents())
+      }
+
+      const backoff = coldFailures.get(sessionId)
+      if (backoff !== undefined && backoff.until > Date.now()) return undefined
+
+      let pending = coldLoads.get(sessionId)
+      if (pending === undefined) {
+        // 读取不绑 signal，结果按会话共享；本请求的断开交由 abortable 单独处理，不会连带作废缓存。
+        const attempt = readStoredEvents(ctx, sessionId)
+        coldLoads.set(sessionId, attempt)
+        trimTracked(coldLoads, sessionId)
+        // 只把失败项从缓存摘掉，让退避后的下一次轮询重新尝试；日志与返回值统一由下面的 await 分支处理。
+        void attempt.catch(() => {
+          if (coldLoads.get(sessionId) === attempt) coldLoads.delete(sessionId)
+        })
+        pending = attempt
+      }
+      try {
+        const events = await abortable(pending, signal)
+        coldFailures.delete(sessionId)
+        return estimateFrom(sessionId, events)
+      } catch (error) {
+        // 请求断开不算冷读失败：不记退避也不告警，底层读取会继续完成并留给后续轮询复用。
+        if (isAbortError(error)) return undefined
+        console.warn(
+          '[dsh-live-token-stats] 冷会话 ' + sessionId + ' 的结算估算读取失败，连续第 '
+          + String(recordFailure(sessionId)) + ' 次，已按退避稍后重试：',
+          error,
+        )
+        return undefined
+      }
+    },
+  }
+}
+
 /**
  * 构建由追踪器支撑的 RPC 通道处理器。
- * `endpoint` 为 `snapshot`、载荷含 `{ sessionId }` 时返回该会话的实时速率。
+ * `endpoint` 为 `snapshot`、载荷含 `{ sessionId }` 时返回该会话的实时速率与结算估算。
  */
 export function createLiveStreamRpcHandler(
   tracker: LiveTokenRateTracker,
+  settle: SettleSource,
 ): ConnectionRpcHandler {
-  return async (endpoint, payload) => {
+  return async (endpoint, payload, signal) => {
     if (endpoint !== 'snapshot') {
       return transportError(new Error(`unknown endpoint ${endpoint}`))
     }
@@ -364,7 +503,9 @@ export function createLiveStreamRpcHandler(
     if (typeof sessionId !== 'string' || sessionId.length === 0) {
       return transportError(new Error('missing sessionId'))
     }
-    return { ok: true, value: tracker.snapshot(sessionId) }
+    const value = tracker.snapshot(sessionId)
+    const settledEstimate = await settle.get(sessionId, signal)
+    return { ok: true, value: settledEstimate === undefined ? value : { ...value, settledEstimate } }
   }
 }
 
@@ -421,7 +562,7 @@ export function installHostLiveStream(
                 t: new Date(now).toISOString(),
                 ty: chunk.type,
                 i: chunk.index,
-                c: deltaTextOf(chunk),
+                c: deltaText(chunk),
               }
               if (chunk.type === 'tool-call-delta') {
                 if (chunk.name !== undefined) frame.n = chunk.name
@@ -441,7 +582,7 @@ export function installHostLiveStream(
               } else {
                 d.frames.push(frame)
               }
-              const text = deltaTextOf(chunk)
+              const text = deltaText(chunk)
               if (text.length > 0) {
                 if (chunk.type === 'text-delta') d.chars.text += text.length
                 else if (chunk.type === 'reasoning-delta') d.chars.reasoning += text.length
@@ -492,7 +633,8 @@ export function installHostLiveStream(
 
   // 在共享连接传输上挂载客户端拉取用的 RPC 通道。
   // dsh 0.1.5 的 connection.rpc.handle 在登记路由时解析 webServer 会抛 without inject，改为插件自注册通道。
-  mountRpcChannel(ctx, '/dsh-live-token-stats', createLiveStreamRpcHandler(tracker))
+  const settle = createSettleSource(ctx, spec)
+  mountRpcChannel(ctx, '/dsh-live-token-stats', createLiveStreamRpcHandler(tracker, settle))
 
   return {
     tracker,
