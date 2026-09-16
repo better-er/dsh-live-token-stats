@@ -84,7 +84,8 @@ jobs:
         if: steps.published.outputs.published != 'true'
         uses: pnpm/action-setup@v4
         with:
-          version: 9
+          # 版本必须与 package.json 的 packageManager 完全一致，否则 action-setup 会报 Multiple versions of pnpm specified。
+          version: 9.15.9
 
       # setup-node 的 registry-url 告知 npm 向哪个 registry 换 Trusted Publishing 临时凭证。
       # node-version 必须大于等于 24，捆绑的 npm 才大于等于 11.5.1，这是 npm 官方 Trusted Publishing 硬性要求；低于该版本 npm CLI 无法做 OIDC 自动换权，会回退用失效 token 导致 PUT 404 is not in registry。

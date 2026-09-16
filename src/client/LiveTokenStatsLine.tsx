@@ -46,6 +46,8 @@ interface LiveRateSnapshot {
   elapsedMs?: number
   /** 本 step 全程平均速度 tok/s。 */
   avgTokensPerSecond?: number
+  /** 最近一条 assistant/message 的所属 step 与本地整段估算、官方 usage，由主机计算。 */
+  settledEstimate?: { turn: number; step: number; estimated: number; actual?: number; exact: boolean }
 }
 
 // --- Formatting -------------------------------------------------------------
@@ -177,16 +179,25 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
   const settledGroups = (): string[] => {
     const out: string[] = []
     if (lastSettled === null) return out
+    // 输出估算由主机对最后一条 assistant/message 算一次，经实时快照返回；首次轮询返回前不显示估算。
+    // 估算是 assistant/message 落地即更新，投影却要等 step/end 才结算 lastSettled，工具执行阶段两者属于不同的 step。
+    // 只有 turn 与 step 都对上时才把估算和 lastSettled 的实际值配成一对，否则宁可不显示，避免出现跨 step 的假偏差。
+    const est = liveSnap?.settledEstimate
+    const estimated = est !== undefined && est.turn === lastSettled.turn && est.step === lastSettled.step
+      ? est.estimated
+      : undefined
     const durMs = lastSettled.endTime - lastSettled.startTime
     if (durMs > 0) {
-      const tokens = lastSettled.actualTokens !== undefined ? lastSettled.actualTokens : lastSettled.estimatedTokens
-      const mark = lastSettled.actualTokens !== undefined ? '' : '~'
-      out.push(`准确速度 ${mark}${formatTps(tokens / (durMs / 1000))} tok/s`)
+      const tokens = lastSettled.actualTokens !== undefined ? lastSettled.actualTokens : estimated
+      if (tokens !== undefined) {
+        const mark = lastSettled.actualTokens !== undefined ? '' : '~'
+        out.push(`准确速度 ${mark}${formatTps(tokens / (durMs / 1000))} tok/s`)
+      }
     }
-    if (lastSettled.actualTokens !== undefined) {
-      out.push(`估算 ${formatInt(lastSettled.estimatedTokens)} / 实际 ${formatInt(lastSettled.actualTokens)} (${formatGapPct(lastSettled.estimatedTokens, lastSettled.actualTokens)})`)
-    } else {
-      out.push(`估算 ~${formatInt(lastSettled.estimatedTokens)} token`)
+    if (lastSettled.actualTokens !== undefined && estimated !== undefined) {
+      out.push(`估算 ${formatInt(estimated)} / 实际 ${formatInt(lastSettled.actualTokens)} (${formatGapPct(estimated, lastSettled.actualTokens)})`)
+    } else if (estimated !== undefined) {
+      out.push(`估算 ~${formatInt(estimated)} token`)
     }
     return out
   }

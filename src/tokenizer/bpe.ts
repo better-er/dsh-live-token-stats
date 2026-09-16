@@ -1,9 +1,9 @@
 /**
- * DeepSeek-V3/V4 字节级 BPE 的纯函数实现，与 HF transformers 的 `encode(add_special_tokens=false)` 逐 token id 对齐。
+ * DeepSeek V4 字节级 BPE 的纯函数实现，与 HF transformers 的 `encode(add_special_tokens=false)` 逐 token id 对齐。
  *
  * 流程：先做 added tokens 的最长前缀匹配，trie 命中且 special=true 时直接输出该 token id，其余命中视为普通文本。
  * 然后走 pre_tokenizer，即三条 Isolated Split 加 ByteLevel，再在每段内按 merges rank 迭代合并，最后返回 token id 序列。
- * 数据来自 src/tokenizer/data.ts，由 scripts/export-tokenizer-data.mjs 从 HF tokenizer.json 生成。
+ * 数据来自 src/tokenizer/data.ts，由官方 HF tokenizer.json 离线导出。
  *
  * 注：与 transformers 的差异仅在 non-special added token，它们命中后依然按普通文本走完整 BPE，tokenizers 的 split 默认 true 即递归 tokenize 该区间，不产生独占 token id。
  * 已实测 ` response` 输出 BPE 的 4256 而非 128822。

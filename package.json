@@ -1,6 +1,6 @@
 {
   "name": "dsh-live-token-stats",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "DSH Web 插件：基于 DeepSeek 官方 BPE 分词表，在 composer 下方实时渲染 token 状态带，显示流式 TPS、输出 token 与首字延迟，并对比上次 step 的估算与实际偏差；纯插件自包含，不改 DSH 源码",
   "keywords": [
     "deepseek-harness",
@@ -15,6 +15,7 @@
     "type": "git",
     "url": "git+https://github.com/better-er/dsh-live-token-stats.git"
   },
+  "packageManager": "pnpm@9.15.9",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
@@ -64,6 +65,7 @@
     "@deepseek-ai/dsh-host-apiproxy": "0.1.1-rc.2",
     "@deepseek-ai/dsh-llm": "0.1.5-rc.2",
     "@deepseek-ai/dsh-session": "0.1.5-rc.2",
+    "@deepseek-ai/dsh-session-persistence": "0.1.5-rc.2",
     "@deepseek-ai/dsh-session-projection": "0.1.5-rc.2",
     "@deepseek-ai/dsh-session-stats": "0.1.5-rc.2",
     "@deepseek-ai/dsh-token-meter": "0.1.5-rc.2",
@@ -87,5 +89,8 @@
     "cordis.patch.yml",
     "README.md"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "engines": {
+    "node": ">=26.3.1"
+  }
 }
