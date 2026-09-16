@@ -33,7 +33,6 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          # 与本地 node -v 锁死同一版本，见工作区 AGENTS.md 的 Node 版本约定。
           node-version: 26.3.1
           cache: pnpm
 

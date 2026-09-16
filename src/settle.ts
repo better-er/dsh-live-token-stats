@@ -28,8 +28,8 @@ function warnSkippedRecord(reason: string, record: unknown): void {
 }
 
 /**
- * 展开 dsh 0.1.5-rc.2 的紧凑流记录为带原始时间的 delta 序列，等价官方 expandAssistantStream。
- * 未知或残缺记录一律跳过，避免一条坏记录让整段估算失效。
+ * 展开 dsh 0.1.5-rc.2 的紧凑流记录为带原始时间的 delta 序列，对应官方 expandAssistantStream。
+ * 有意保留两处差异：官方对未知或残缺记录直接抛错，这里跳过并在 debug 开启时告警，避免一条坏记录让整段估算失效；官方按 dt 的前一项直接累加，这里对缺失项按 0 兜底。
  */
 export function expandCompactStream(stream: readonly unknown[]): { time: number; chunk: StreamChunk }[] {
   const out: { time: number; chunk: StreamChunk }[] = []
@@ -79,13 +79,14 @@ export function expandCompactStream(stream: readonly unknown[]): { time: number;
 }
 
 /**
- * 判定一个 chunk 是否为携带 token 的增量。
- * 投影、实时追踪与整段结算共用这一份，三处口径必须一致。
+ * 判定一个 chunk 是否携带模型输出 token，语义对齐官方 isTokenDelta：
+ * 文本与推理要求内容非空，工具调用要求参数片段非空或带 name。
+ * 投影、实时追踪与整段结算共用这一份，三处口径必须一致，空增量不得计入首字时间。
  */
 export function isDeltaChunk(chunk: StreamChunk): chunk is Extract<StreamChunk, { type: 'text-delta' | 'reasoning-delta' | 'tool-call-delta' }> {
-  return chunk.type === 'text-delta'
-    || chunk.type === 'reasoning-delta'
-    || chunk.type === 'tool-call-delta'
+  if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') return chunk.text !== ''
+  if (chunk.type === 'tool-call-delta') return (chunk.argumentsDelta ?? '') !== '' || chunk.name !== undefined
+  return false
 }
 
 /** 一个增量 chunk 携带 token 的文本，无 token 时为空串；投影、实时追踪与整段结算共用。 */
@@ -152,9 +153,10 @@ export interface SettledEstimate {
 }
 
 /**
- * 对一条 assistant/message 的紧凑流做一次整段估算，口径与投影历史实现一致：
- * 文本与反转义后的工具参数按到达顺序拼接后整段分词一次，工具名按调用 id 去重各计一次。
- * usage 到达后不再累加后续 delta，与投影的 exact 短路一致。
+ * 对一条 assistant/message 的紧凑流做一次估算，口径与实时通道一致：
+ * bpe 模式把文本与反转义后的工具参数按到达顺序拼接后整段分词一次，与逐帧增量逐 token 相同；
+ * density 模式按每个成员逐段取整累加，与实时通道的逐帧口径相同，避免结算瞬间出现系统性跳变。
+ * 工具名按调用 id 去重各计一次。usage 到达后不再累加后续 delta。
  */
 export function estimateAssistantMessage(
   data: AssistantMessageData,
@@ -163,6 +165,8 @@ export function estimateAssistantMessage(
   const turn = typeof data.turn === 'number' ? data.turn : -1
   const step = typeof data.step === 'number' ? data.step : -1
   let text = ''
+  // density 与实时通道同口径：逐段取整累加，而不是整段一次取整。
+  let densityTokens = 0
   const calls: { id: string; name: string }[] = []
   let esc: UnescapeState = { ...EMPTY_UNESCAPE }
   let actual: number | undefined
@@ -185,10 +189,12 @@ export function estimateAssistantMessage(
         if (delta.length > 0) {
           const decoded = unescapeFeed(esc, delta)
           esc = decoded.state
-          text += decoded.text
+          if (spec.tokenizerMode === 'density') densityTokens += estimateTextTokens(decoded.text, spec)
+          else text += decoded.text
         }
       } else if (delta.length > 0) {
-        text += delta
+        if (spec.tokenizerMode === 'density') densityTokens += estimateTextTokens(delta, spec)
+        else text += delta
       }
     }
   }
@@ -197,10 +203,7 @@ export function estimateAssistantMessage(
     actual = usage.outputTokens
     exact = true
   }
-  let estimated = 0
-  if (text.length > 0) {
-    estimated += spec.tokenizerMode === 'bpe' ? tokenCount(text) : estimateTextTokens(text, spec)
-  }
+  let estimated = spec.tokenizerMode === 'bpe' ? (text.length > 0 ? tokenCount(text) : 0) : densityTokens
   for (const call of calls) estimated += toolNameTokenCount(call.name, spec)
   const value: SettledEstimate = { turn, step, estimated, exact }
   return actual === undefined ? value : { ...value, actual }

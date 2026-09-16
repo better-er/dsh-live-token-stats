@@ -125,5 +125,23 @@ describe('createSettleSource', () => {
     expect(warn).toHaveBeenCalled()
     warn.mockRestore()
   })
+
+  it('请求断开只让本次调用返回，不记退避也不丢缓存', async () => {
+    let release: () => void = () => undefined
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const read = vi.fn(async () => { await gate; return { events: [assistantMessage(1, 'ok')] } })
+    const close = vi.fn(async () => undefined)
+    const handle = { read, close } as unknown as SessionHandle
+    const source = createSettleSource(makeCtx({ sessionPersistence: fakePersistence(vi.fn(async () => handle)) }), SPEC)
+    const controller = new AbortController()
+    const first = source.get('cold', controller.signal)
+    controller.abort()
+    expect(await first).toBeUndefined()
+    // 断开不算失败，底层读取完成后缓存仍可复用，下一次轮询不会因退避拿不到数据
+    release()
+    const second = await source.get('cold')
+    expect(second?.estimated).toBe(tokenCount('ok'))
+    expect(close).toHaveBeenCalledTimes(1)
+  })
 })
 

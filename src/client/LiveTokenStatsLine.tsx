@@ -138,8 +138,9 @@ function useLiveSnapshot(
           // step 仍在但生成已停，例如工具执行阶段，降到 500ms 减少空转。
           delayMs = 500
         }
-      } catch {
+      } catch (error) {
         if (disposed) return
+        console.warn('[dsh-live-token-stats] 实时快照轮询失败，本帧按空数据渲染：', error)
         setLive(null)
       }
       if (!disposed) timer = setTimeout(() => void poll(), delayMs)

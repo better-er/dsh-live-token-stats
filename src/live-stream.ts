@@ -355,21 +355,20 @@ function persistenceOf(ctx: Context): SessionPersistence | undefined {
  * 按 id 从持久化读一次完整事件日志。
  * 只读句柄不取写所有权，可与运行中的写句柄并存；句柄无论成败都必须显式关闭。
  * @param ctx - 主机插件上下文。
+ * 有意不接收客户端 signal：读取结果按会话共享给并发轮询，绑上某一个请求的 signal 会让该请求断开后连带作废缓存。
  * @param sessionId - 目标会话。
- * @param signal - 客户端断开时中止读取。
  * @returns 该会话已持久化的全部事件。
  */
 async function readStoredEvents(
   ctx: Context,
   sessionId: string,
-  signal?: AbortSignal,
 ): Promise<readonly SessionEvent[]> {
   const persistence = persistenceOf(ctx)
   if (persistence === undefined) throw new Error('sessionPersistence 服务缺席，无法读取冷会话 ' + sessionId)
   // 会话 id 在公开面是品牌化的 SessionId；这里是插件自带的字符串，断言即可，不引入运行时的品牌构造器。
-  const handle = await persistence.open(sessionId as SessionId, 'read', { signal })
+  const handle = await persistence.open(sessionId as SessionId, 'read')
   try {
-    const result = await handle.read(undefined, undefined, { signal })
+    const result = await handle.read(undefined, undefined)
     return result.events
   } finally {
     await handle.close()
@@ -380,13 +379,41 @@ async function readStoredEvents(
 const COLD_BACKOFF_BASE_MS = 10_000
 /** 冷读失败退避的上限毫秒。 */
 const COLD_BACKOFF_MAX_MS = 300_000
+/** 按会话记账的缓存上限，超过后淘汰最早插入的会话，避免长驻会话不断累积。 */
+const MAX_TRACKED_SESSIONS = 32
+
+/** 把一张按会话记账的表控制在容量上限内，淘汰最早插入且不是当前会话的项。 */
+function trimTracked<T>(map: Map<string, T>, keep: string): void {
+  while (map.size > MAX_TRACKED_SESSIONS) {
+    const oldest = map.keys().next().value
+    if (oldest === undefined || oldest === keep) return
+    map.delete(oldest)
+  }
+}
+
+/** 判定错误是否为请求断开产生的 abort，这类错误不触发退避重试。 */
+function isAbortError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && (error as { name?: unknown }).name === 'AbortError'
+}
+
+/** 把共享读取与本次请求的 signal 关联：请求断开时调用者立即返回，底层读取继续完成并留给后续轮询复用。 */
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (signal === undefined) return promise
+  if (signal.aborted) return Promise.reject(new DOMException('aborted', 'AbortError'))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new DOMException('aborted', 'AbortError'))
+    signal.addEventListener('abort', onAbort, { once: true })
+    const settle = (): void => signal.removeEventListener('abort', onAbort)
+    promise.then(resolve, reject).then(settle, settle)
+  })
+}
 
 /**
  * 结算估算读取器：对每个会话只对最后一条 assistant/message 算一次，按它的 seq 缓存。
  * 活跃会话用 ctx.sessions 的同步快照，冷会话用 sessionPersistence 的只读句柄异步读一次；
  * 因此冷读重放不再经过投影的逐帧分词，估算只在真正需要时算一次。
  * 冷读成功结果按会话缓存，会话一旦重新出现在 ctx.sessions 就作废该缓存，避免移出 store 后再冷读命中旧日志。
- * 冷读失败退避重试，避免空闲轮询对读不到的会话持续刷告警。
+ * 冷读失败退避重试，避免空闲轮询对读不到的会话持续刷告警；三张按会话记账的表都设容量上限，超出后淘汰最早的会话。
  * @param ctx - 主机插件上下文。
  * @param spec - 已解析的估算器 spec。
  * @returns 供 RPC 快照调用的读取器。
@@ -403,6 +430,7 @@ export function createSettleSource(ctx: Context, spec: Readonly<EstimatorSpec>):
     if (hit !== undefined && hit.asOfSeq === found.seq) return hit.value
     const value = estimateAssistantMessage(found.data, spec)
     cache.set(sessionId, { asOfSeq: found.seq, value })
+    trimTracked(cache, sessionId)
     return value
   }
 
@@ -411,6 +439,7 @@ export function createSettleSource(ctx: Context, spec: Readonly<EstimatorSpec>):
     const count = (coldFailures.get(sessionId)?.count ?? 0) + 1
     const delay = Math.min(COLD_BACKOFF_BASE_MS * 2 ** (count - 1), COLD_BACKOFF_MAX_MS)
     coldFailures.set(sessionId, { count, until: Date.now() + delay })
+    trimTracked(coldFailures, sessionId)
     return count
   }
 
@@ -430,8 +459,10 @@ export function createSettleSource(ctx: Context, spec: Readonly<EstimatorSpec>):
 
       let pending = coldLoads.get(sessionId)
       if (pending === undefined) {
-        const attempt = readStoredEvents(ctx, sessionId, signal)
+        // 读取不绑 signal，结果按会话共享；本请求的断开交由 abortable 单独处理，不会连带作废缓存。
+        const attempt = readStoredEvents(ctx, sessionId)
         coldLoads.set(sessionId, attempt)
+        trimTracked(coldLoads, sessionId)
         // 只把失败项从缓存摘掉，让退避后的下一次轮询重新尝试；日志与返回值统一由下面的 await 分支处理。
         void attempt.catch(() => {
           if (coldLoads.get(sessionId) === attempt) coldLoads.delete(sessionId)
@@ -439,10 +470,12 @@ export function createSettleSource(ctx: Context, spec: Readonly<EstimatorSpec>):
         pending = attempt
       }
       try {
-        const events = await pending
+        const events = await abortable(pending, signal)
         coldFailures.delete(sessionId)
         return estimateFrom(sessionId, events)
       } catch (error) {
+        // 请求断开不算冷读失败：不记退避也不告警，底层读取会继续完成并留给后续轮询复用。
+        if (isAbortError(error)) return undefined
         console.warn(
           '[dsh-live-token-stats] 冷会话 ' + sessionId + ' 的结算估算读取失败，连续第 '
           + String(recordFailure(sessionId)) + ' 次，已按退避稍后重试：',

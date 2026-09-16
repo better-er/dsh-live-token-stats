@@ -60,6 +60,16 @@ describe('activeStepApply', () => {
     expect(s.active!.firstTokenTime).toBe(1010)
   })
 
+  it('空增量不记首字时间，与官方 isTokenDelta 口径一致', () => {
+    let s = activeStepApply(ACTIVE_INIT, stepStart(0, 0, 0, 1000))
+    s = activeStepApply(s, event(1, 'assistant/message', {
+      turn: 0,
+      step: 0,
+      stream: [{ type: 'text-chunks', time0: 1010, index: 0, dt: [10], texts: ['', 'hi'] }],
+    }, 1030))
+    expect(s.active!.firstTokenTime).toBe(1020)
+  })
+
   it('usage 记录实际值并置 exact', () => {
     let s = activeStepApply(ACTIVE_INIT, stepStart(0, 0, 0, 1000))
     s = activeStepApply(s, usageChunk(1, 88, 1020))
