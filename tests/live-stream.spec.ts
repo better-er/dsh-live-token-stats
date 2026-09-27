@@ -7,9 +7,9 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { LiveTokenRateTracker } from '../src/live-stream.ts'
+import { LiveTokenRateTracker, installHostLiveStream } from '../src/live-stream.ts'
 import { ESTIMATOR_DEFAULTS, type EstimatorSpec } from '../src/estimator.ts'
-import type { StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 
 const SPEC: Readonly<EstimatorSpec> = { ...ESTIMATOR_DEFAULTS, tokenizerMode: 'density' }
@@ -302,5 +302,84 @@ describe('LiveTokenRateTracker', () => {
     const snap = t.snapshot(SESSION, 1100)
     expect(snap.tokensPerSecond).toBeDefined()
     expect(snap.tokensPerSecond!).toBeGreaterThan(0)
+  })
+})
+/**
+ * 拦截器的收尾归还：无论流是正常走完、被消费者提前 return，还是上游抛错中断，
+ * 都必须把 beginStep 借出的存活流计数还掉。
+ * 只写在正常路径上时，被用户点击停止打断的流不归还，activeStreams 不归零，
+ * 快照一直报 generating，客户端停在生成中并把无限增长的 idle 计入「已停顿」。
+ */
+describe('installHostLiveStream 的 llm/stream 拦截与流归还', () => {
+  type Interceptor = (options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) => AsyncIterable<StreamChunk>
+
+  /** 假的主机上下文：只需 on 捕获拦截器，RPC 挂载与结算读取不参与本组用例。 */
+  function fakeHostContext(): { ctx: Parameters<typeof installHostLiveStream>[0]; interceptors: Interceptor[] } {
+    const interceptors: Interceptor[] = []
+    const ctx = {
+      on: (_event: string, fn: Interceptor): (() => void) => {
+        interceptors.push(fn)
+        return () => { interceptors.length = 0 }
+      },
+      get: (): undefined => undefined,
+      inject: (): undefined => undefined,
+    }
+    return { ctx: ctx as unknown as Parameters<typeof installHostLiveStream>[0], interceptors }
+  }
+
+  const OPTIONS = { sessionId: SESSION, model: 'test' } as unknown as GenerateOptions
+
+  /** 依次产出 count 条十 token 文本块。 */
+  async function* tenTokenChunks(count: number): AsyncIterable<StreamChunk> {
+    for (let n = 0; n < count; n += 1) yield tenTokenFrame()
+  }
+
+  function install(): { tracker: LiveTokenRateTracker; intercept: Interceptor } {
+    const { ctx, interceptors } = fakeHostContext()
+    const { tracker } = installHostLiveStream(ctx, SPEC)
+    const intercept = interceptors[0]
+    if (intercept === undefined) throw new Error('拦截器未注册')
+    return { tracker, intercept }
+  }
+
+  it('消费者正常读完，活跃流归零', async () => {
+    const { tracker, intercept } = install()
+    for await (const chunk of intercept(OPTIONS, () => tenTokenChunks(2))) void chunk
+    expect(tracker.snapshot(SESSION).generating).toBe(false)
+  })
+
+  it('消费者提前 return，被停止打断的流也会归零', async () => {
+    const { tracker, intercept } = install()
+    // break 触发迭代器 return()，等价于用户点击停止后内核丢弃这条流。
+    for await (const chunk of intercept(OPTIONS, () => tenTokenChunks(10))) {
+      void chunk
+      break
+    }
+    expect(tracker.snapshot(SESSION).generating).toBe(false)
+  })
+
+  it('上游抛错中断，活跃流仍然归零', async () => {
+    const { tracker, intercept } = install()
+    async function* failing(): AsyncIterable<StreamChunk> {
+      yield tenTokenFrame()
+      throw new Error('生成被中断')
+    }
+    await expect((async () => {
+      for await (const chunk of intercept(OPTIONS, () => failing())) void chunk
+    })()).rejects.toThrow('生成被中断')
+    expect(tracker.snapshot(SESSION).generating).toBe(false)
+  })
+
+  it('并存的另一条流不受影响，全部收尾后才归零', async () => {
+    const { tracker, intercept } = install()
+    const first = intercept(OPTIONS, () => tenTokenChunks(10))[Symbol.asyncIterator]()
+    const second = intercept(OPTIONS, () => tenTokenChunks(10))[Symbol.asyncIterator]()
+    await first.next()
+    await second.next()
+    await first.return?.()
+    // 只收尾一条，另一条仍存活，generating 必须保持真。
+    expect(tracker.snapshot(SESSION).generating).toBe(true)
+    await second.return?.()
+    expect(tracker.snapshot(SESSION).generating).toBe(false)
   })
 })

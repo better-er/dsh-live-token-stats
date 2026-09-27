@@ -551,81 +551,86 @@ export function installHostLiveStream(
             frames: [],
           }
           : null
-        for await (const chunk of next()) {
-          // timeMs：adapter 的 chunk 不带时间戳；用墙钟，让客户端渲染的速率随真实时间自然衰减。
-          const now = Date.now()
-          tracker.fold(String(sessionId), chunk, now)
-          // —— 诊断统计，与 fold 同一数据源，独立切分一遍，仅 debug 开启时运行——
-          if (d !== null) {
-            if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta') {
-              const frame: { t: string; ty: string; i: number; n?: string; id?: string; c: string } = {
-                t: new Date(now).toISOString(),
-                ty: chunk.type,
-                i: chunk.index,
-                c: deltaText(chunk),
-              }
-              if (chunk.type === 'tool-call-delta') {
-                if (chunk.name !== undefined) frame.n = chunk.name
-                frame.id = String(chunk.id)
-                let pos = d.toolByIdx.get(chunk.index)
-                if (pos === undefined) {
-                  pos = d.tools.length
-                  d.toolByIdx.set(chunk.index, pos)
-                  d.tools.push({ name: chunk.name ?? null, id: chunk.id, argsChars: chunk.argumentsDelta.length })
-                } else {
-                  const t = d.tools[pos]
-                  if (t.name === null && chunk.name !== undefined) t.name = chunk.name
-                  t.argsChars += chunk.argumentsDelta.length
+        try {
+          for await (const chunk of next()) {
+            // timeMs：adapter 的 chunk 不带时间戳；用墙钟，让客户端渲染的速率随真实时间自然衰减。
+            const now = Date.now()
+            tracker.fold(String(sessionId), chunk, now)
+            // —— 诊断统计，与 fold 同一数据源，独立切分一遍，仅 debug 开启时运行——
+            if (d !== null) {
+              if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta' || chunk.type === 'tool-call-delta') {
+                const frame: { t: string; ty: string; i: number; n?: string; id?: string; c: string } = {
+                  t: new Date(now).toISOString(),
+                  ty: chunk.type,
+                  i: chunk.index,
+                  c: deltaText(chunk),
                 }
-                // 仅当确实带内容才入 frames，空参数的首帧 name 也保留
-                if (chunk.argumentsDelta.length > 0 || chunk.name !== undefined) d.frames.push(frame)
-              } else {
-                d.frames.push(frame)
-              }
-              const text = deltaText(chunk)
-              if (text.length > 0) {
-                if (chunk.type === 'text-delta') d.chars.text += text.length
-                else if (chunk.type === 'reasoning-delta') d.chars.reasoning += text.length
-                else d.chars.tool += text.length
-                // 与 tracker/投影同口径：工具参数反转义后再计数，frames 保留原始 delta 供离线对照
-                const unesc = chunk.type === 'tool-call-delta' ? unescapeFeed(d.esc, text) : null
-                if (unesc !== null) {
-                  d.esc = unesc.state
-                  d.inc = incrementalFeed(d.inc, unesc.text).state
+                if (chunk.type === 'tool-call-delta') {
+                  if (chunk.name !== undefined) frame.n = chunk.name
+                  frame.id = String(chunk.id)
+                  let pos = d.toolByIdx.get(chunk.index)
+                  if (pos === undefined) {
+                    pos = d.tools.length
+                    d.toolByIdx.set(chunk.index, pos)
+                    d.tools.push({ name: chunk.name ?? null, id: chunk.id, argsChars: chunk.argumentsDelta.length })
+                  } else {
+                    const t = d.tools[pos]
+                    if (t.name === null && chunk.name !== undefined) t.name = chunk.name
+                    t.argsChars += chunk.argumentsDelta.length
+                  }
+                  // 仅当确实带内容才入 frames，空参数的首帧 name 也保留
+                  if (chunk.argumentsDelta.length > 0 || chunk.name !== undefined) d.frames.push(frame)
                 } else {
-                  d.inc = incrementalFeed(d.inc, text).state
+                  d.frames.push(frame)
                 }
+                const text = deltaText(chunk)
+                if (text.length > 0) {
+                  if (chunk.type === 'text-delta') d.chars.text += text.length
+                  else if (chunk.type === 'reasoning-delta') d.chars.reasoning += text.length
+                  else d.chars.tool += text.length
+                  // 与 tracker/投影同口径：工具参数反转义后再计数，frames 保留原始 delta 供离线对照
+                  const unesc = chunk.type === 'tool-call-delta' ? unescapeFeed(d.esc, text) : null
+                  if (unesc !== null) {
+                    d.esc = unesc.state
+                    d.inc = incrementalFeed(d.inc, unesc.text).state
+                  } else {
+                    d.inc = incrementalFeed(d.inc, text).state
+                  }
+                }
+              } else if (chunk.type === 'usage' && chunk.usage && typeof chunk.usage.outputTokens === 'number') {
+                d.usageOutput = chunk.usage.outputTokens
+                d.usageReasoning = chunk.usage.reasoningTokens ?? null
+                if (d.bpeAtUsage === null) d.bpeAtUsage = incrementalTotal(d.inc)
               }
-            } else if (chunk.type === 'usage' && chunk.usage && typeof chunk.usage.outputTokens === 'number') {
-              d.usageOutput = chunk.usage.outputTokens
-              d.usageReasoning = chunk.usage.reasoningTokens ?? null
-              if (d.bpeAtUsage === null) d.bpeAtUsage = incrementalTotal(d.inc)
             }
+            yield chunk
           }
-          yield chunk
+        } finally {
+          // 流结束：本流 BPE 总计数 + 构成 + 官方 usage + 完整 delta 序列一行落盘。
+          if (d !== null) {
+            debugLog({
+              ev: 'stream',
+              ts: new Date().toISOString(),
+              tsMs: Date.now(),
+              session: sessionId.slice(0, 12),
+              seq,
+              model: d.model,
+              chars: d.chars,
+              bpe: incrementalTotal(d.inc),
+              // usage 提前到达而流还有后续 delta 时 bpeAtUsage < bpe，投影 exact 后会忽略剩余 delta。
+              bpeAtUsage: d.bpeAtUsage,
+              usageOutput: d.usageOutput,
+              usageReasoning: d.usageReasoning,
+              tools: d.tools,
+              frames: d.frames,
+              mode: spec.tokenizerMode,
+            })
+          }
+          // 正常结束、抛错中断、消费者提前 return，三种收尾都必须归还这条流计数。
+          // 只写在正常路径上时，被停止打断的流永不归还，activeStreams 不归零，快照一直报
+          // generating，客户端卡在生成中，停止之后的空闲时间被无限计入「已停顿」。
+          tracker.endStep(String(sessionId))
         }
-        // 流结束：本流 BPE 总计数 + 构成 + 官方 usage + 完整 delta 序列一行落盘。
-        if (d !== null) {
-          debugLog({
-            ev: 'stream',
-            ts: new Date().toISOString(),
-            tsMs: Date.now(),
-            session: sessionId.slice(0, 12),
-            seq,
-            model: d.model,
-            chars: d.chars,
-            bpe: incrementalTotal(d.inc),
-            // usage 提前到达而流还有后续 delta 时 bpeAtUsage < bpe，投影 exact 后会忽略剩余 delta。
-            bpeAtUsage: d.bpeAtUsage,
-            usageOutput: d.usageOutput,
-            usageReasoning: d.usageReasoning,
-            tools: d.tools,
-            frames: d.frames,
-            mode: spec.tokenizerMode,
-          })
-        }
-        // 流结束：标记本 step 生成完毕，之后浏览器轮询得到的空闲时间不再计入「已停顿」。
-        tracker.endStep(String(sessionId))
       })()
     },
     { global: true, prepend: true },
