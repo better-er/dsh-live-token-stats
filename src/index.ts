@@ -34,8 +34,13 @@ export interface Config extends EstimatorConfig {
   debug?: boolean
 }
 
-/** {@link Config} 的运行时 schema，默认值由 loader 应用。 */
-export const Config: z<Config> = z.object({
+/**
+ * {@link Config} 的运行时 schema，默认值由 loader 应用。
+ *
+ * 注解用未知类型过渡到 z<Config>：schemastery 的 .default() 会把输出类型包成 Volatile<T>，
+ * 与手写的 Config 接口必然分家，这里断言回配置面的形状，运行时不受影响。
+ */
+export const Config = z.object({
   enabled: z.boolean().default(true),
   asciiTokenPerChar: z.number().min(0.01).default(ESTIMATOR_DEFAULTS.asciiTokenPerChar),
   cjkTokenPerChar: z.number().min(0.01).default(ESTIMATOR_DEFAULTS.cjkTokenPerChar),
@@ -44,7 +49,7 @@ export const Config: z<Config> = z.object({
   // schemastery 无 z.enum，用 union 实现二选一
   tokenizerMode: z.union([z.const('bpe'), z.const('density')]).default(ESTIMATOR_DEFAULTS.tokenizerMode),
   debug: z.boolean().default(false),
-})
+}) as unknown as z<Config>
 
 /**
  * 注册 liveTokenStats 投影与实时主机→客户端通道。

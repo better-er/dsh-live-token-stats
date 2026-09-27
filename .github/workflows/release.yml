@@ -101,6 +101,11 @@ jobs:
         if: steps.published.outputs.published != 'true'
         run: pnpm install --frozen-lockfile
 
+      # 本插件有单测，类型检查与测试都作为发布前的门。
+      - name: Typecheck
+        if: steps.published.outputs.published != 'true'
+        run: pnpm typecheck
+
       - name: Test
         if: steps.published.outputs.published != 'true'
         run: pnpm test
