@@ -13,6 +13,7 @@
 
 - Node ≥ 26.3.1，pnpm 9.15.9，锁文件 `pnpm-lock.yaml` 为 lockfileVersion 9。
 - 首次：`pnpm install`，用 `--frozen-lockfile` 保证与锁文件一致。
+- 仓库根 `.npmrc` 写了 `auto-install-peers=false`：`peerDependencies` 只作 dsh 的兼容门禁，不参与本地安装；源码 import 的包都在 `devDependencies` 里显式声明。
 
 ## 日常开发
 
@@ -35,7 +36,7 @@ pnpm build       # 构建产物到 lib/，tsdown
 ## 分支与提交
 
 - 主分支：`main`。所有改动都通过 PR 进入 `main`，**不直接 push main**。
-- 功能分支命名：`feature/<简述>` 新功能、`fix/<简述>` 缺陷、`docs/<简述>` 文档、`chore/<简述>` 杂项。
+- 功能分支命名：`feat/<简述>` 新功能、`fix/<简述>` 缺陷、`docs/<简述>` 文档、`chore/<简述>` 杂项。
 - 也可以按版本维护分支如 `dev/v0.3.0` 并行开发，经 PR 合入 `main`。
 - 提交信息建议遵循单一职责，中文正文，可带 `feat:` / `fix:` / `docs:` / `chore:` / `bump:` 前缀，与仓库现有提交风格一致。
 
@@ -53,7 +54,7 @@ pnpm build       # 构建产物到 lib/，tsdown
 
 - **发布 = 打 tag**：推送形如 `v0.3.0` 的 tag 即自动发版，不再需要手动改版本号。`release.yml` 自动执行：
   1. 凭 tag 号把 `package.json` 版本更新为对应值，并提交回 `main`；
-  2. 测试加构建；
+  2. 类型检查、测试加构建；
   3. 发布到 npm，走 Trusted Publishing：需先在 npm 包管理页把此仓库的 GitHub Actions 绑定到对应包，即 Enable trusted publishing → GitHub Actions → owner/仓库/branch，无需配置 NPM_TOKEN；
   4. 生成 GitHub Release **草稿**，人工确认后正式公布。
 - 人只负责决定发哪个版本并打对应 tag。注意需先在 `main` 合入待发代码，再打 tag，否则发布的是旧代码。
