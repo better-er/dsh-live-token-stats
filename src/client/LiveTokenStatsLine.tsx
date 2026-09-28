@@ -194,7 +194,7 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
 
   const items: StatItem[] = []
 
-  // 结算读数：准确速度 + 估算/实际偏差，等待首字与空闲态共用。
+  // 结算读数：结算速度 + 估算/实际偏差，等待首字与空闲态共用；速度标签按有无官方 usage 分准确与估算。
   const settledItems = (): StatItem[] => {
     const out: StatItem[] = []
     if (lastSettled === null) return out
@@ -207,10 +207,12 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
       : undefined
     const durMs = lastSettled.endTime - lastSettled.startTime
     if (durMs > 0) {
-      const tokens = lastSettled.actualTokens !== undefined ? lastSettled.actualTokens : estimated
+      const actualTokens = lastSettled.actualTokens
+      const tokens = actualTokens !== undefined ? actualTokens : estimated
+      // 标签跟着来源走：官方 usage 已到才叫准确速度，只有整段估算时叫估算速度，避免「准确速度」配一个 `~`。
+      const exact = actualTokens !== undefined
       if (tokens !== undefined) {
-        const mark = lastSettled.actualTokens !== undefined ? '' : '~'
-        out.push({ label: '准确速度', value: `${mark}${formatTps(tokens / (durMs / 1000))} tok/s` })
+        out.push({ label: exact ? '准确速度' : '估算速度', value: `${exact ? '' : '~'}${formatTps(tokens / (durMs / 1000))} tok/s` })
       }
     }
     if (lastSettled.actualTokens !== undefined && estimated !== undefined) {
@@ -271,7 +273,7 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
     if (ttft !== undefined && ttft !== '') summary.push({ label: '首字延迟', value: ttft })
   } else {
     // 空闲态上格换成上次结算的平均速度，直接从 items 里取已经算好的那一项。
-    const settledSpeed = items.find((item) => item.label === '准确速度')
+    const settledSpeed = items.find((item) => item.label === '准确速度' || item.label === '估算速度')
     if (settledSpeed !== undefined) {
       summary.push({ label: '平均速度', value: settledSpeed.value })
     } else if (lastSettled !== null && lastSettled.firstTokenTime !== null) {
