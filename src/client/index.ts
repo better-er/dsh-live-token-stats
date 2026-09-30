@@ -9,9 +9,10 @@
  * @module dsh-live-token-stats/client
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
 // 仅类型：合并 ui-conversation 的 SlotMap 声明，让 'conversation.composer.dock' 槽位名在 slots 注册表里通过类型检查。
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import { LiveTokenStatsLine } from './LiveTokenStatsLine.tsx'
 
 /** 插件名即配置项 id。 */

@@ -28,7 +28,7 @@ import {
   useAnchoredPosition,
   useDismissOnOutsidePointer,
 } from '@deepseek-ai/dsh-client-ui-primitives'
-import type { UseProjection } from '@deepseek-ai/dsh-client-runtime/client'
+import type { UseProjection } from '@deepseek-ai/dsh-api-session-controller/client'
 import type { LiveTokenStatsProjection } from '../projection.ts'
 
 /** 一个统计指标：详情面板里的一行，也是外显胶囊的候选。 */
