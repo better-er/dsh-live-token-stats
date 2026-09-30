@@ -33,7 +33,6 @@ export default defineConfig([
         '@deepseek-ai/schemastery',
         // 仅调用的官方运行时包不打入 bundle profile 树已安装。
         '@deepseek-ai/dsh-client-connection',
-        '@deepseek-ai/dsh-host-apiproxy',
         '@deepseek-ai/dsh-llm',
         '@deepseek-ai/dsh-session',
         '@deepseek-ai/dsh-session-projection',

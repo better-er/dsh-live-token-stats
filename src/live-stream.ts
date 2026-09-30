@@ -23,7 +23,7 @@ import type { Context } from '@deepseek-ai/cordis'
 // 副作用类型导入：从 connection 包的主机入口引入主机 `ctx.connection` 即 HostConnectionHandle 的声明合并。
 import '@deepseek-ai/dsh-client-connection'
 import type { RpcChannelHandler } from './rpc-channel.ts'
-import { transportError } from '@deepseek-ai/dsh-host-apiproxy/api'
+import { transportError } from '@deepseek-ai/dsh-client-connection'
 import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { estimateTextTokens, type EstimatorSpec } from './estimator.ts'
 import { tokenCount } from './tokenizer/bpe.ts'
