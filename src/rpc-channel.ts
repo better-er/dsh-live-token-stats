@@ -1,13 +1,10 @@
 /**
  * 在 webServer 上自注册一条 connection 风格的 RPC 通道。
  *
- * dsh 0.1.5 的 connection.rpc.handle 会在登记路由时解析 webServer，实测任何插件上下文都抛
- * `cannot get property "webServer" without inject`；官方发行包内没有 handle 的调用点，dsh-api-gateway 用的是 rpc.intercept。
- * 因此这里直接向 webServer 注册 prefix 路由，复用 connection.requestRejection 的
- * Host 校验与浏览器鉴权，并实现同样的 client-request/server-response 信封。
+ * dsh 0.1.5 的 connection.rpc.handle 会在登记路由时解析 webServer，实测任何插件上下文都抛 `cannot get property "webServer" without inject`；官方发行包内没有 handle 的调用点，dsh-api-gateway 用的是 rpc.intercept。
+ * 因此这里直接向 webServer 注册 prefix 路由，复用 connection.requestRejection 的 Host 校验与浏览器鉴权，并实现同样的 client-request/server-response 信封。
  *
- * 本文件与 better-er/dsh-classic-coding 的 src/rpc-channel.ts 同源，鉴权与信封逻辑逐字一致，此处源自该仓库。
- * 改动任一侧的鉴权、端点解析或信封语义时，必须同步另一侧。
+ * 本文件与 better-er/dsh-classic-coding 的 src/rpc-channel.ts 同源，鉴权与信封逻辑逐字一致，此处源自该仓库。改动任一侧的鉴权、端点解析或信封语义时，必须同步另一侧。
  * 已知差异：上游额外做 content-type 白名单与 content-length 预检，请求体上限为 300MiB；本插件载荷只有 snapshot 信封，保留 8MiB 上限。
  *
  * @module dsh-live-token-stats/rpc-channel
