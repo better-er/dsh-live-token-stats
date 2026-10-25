@@ -155,7 +155,7 @@ export interface SettledEstimate {
 /**
  * 对一条 assistant/message 的紧凑流做一次估算，口径与实时通道一致：
  * bpe 模式把文本与反转义后的工具参数按到达顺序拼接后整段分词一次，与逐帧增量逐 token 相同；
- * density 模式按每个成员逐段取整累加，与实时通道的逐帧口径相同，避免结算瞬间出现系统性跳变。
+ * density 模式按每个成员逐段累加未取整值，与实时通道的逐帧口径相同，结算瞬间不再出现系统性跳变。
  * 工具名按调用 id 去重各计一次。usage 到达后不再累加后续 delta。
  */
 export function estimateAssistantMessage(
@@ -165,7 +165,7 @@ export function estimateAssistantMessage(
   const turn = typeof data.turn === 'number' ? data.turn : -1
   const step = typeof data.step === 'number' ? data.step : -1
   let text = ''
-  // density 与实时通道同口径：逐段取整累加，而不是整段一次取整。
+  // density 与实时通道同口径：逐段累加未取整值，只在展示时取整。
   let densityTokens = 0
   const calls: { id: string; name: string }[] = []
   let esc: UnescapeState = { ...EMPTY_UNESCAPE }

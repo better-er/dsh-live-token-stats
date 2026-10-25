@@ -82,8 +82,8 @@ export function countAsciiCjk(text: string): { ascii: number; cjk: number } {
   return { ascii, cjk }
 }
 
-/** 估算一段生成文本所代表的输出 token 数。 */
+/** 估算一段生成文本所代表的输出 token 数，返回未取整值，由展示层统一取整。 */
 export function estimateTextTokens(text: string, spec: Readonly<EstimatorSpec>): number {
   const { ascii, cjk } = countAsciiCjk(text)
-  return Math.round(ascii * spec.asciiTokenPerChar + cjk * spec.cjkTokenPerChar)
+  return ascii * spec.asciiTokenPerChar + cjk * spec.cjkTokenPerChar
 }
