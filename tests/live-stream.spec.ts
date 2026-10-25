@@ -23,7 +23,7 @@ function toolCallDelta(argumentsDelta: string): StreamChunk {
   return { type: 'tool-call-delta', index: 0, id: ToolCallId('call-1'), name: 'write', argumentsDelta }
 }
 
-/** density 模式：33 个 ASCII ≈ 10 token。 */
+/** density 模式：33 个 ASCII 为 9.9 token，保留未取整值。 */
 function tenTokenFrame(): StreamChunk {
   return textDelta('a'.repeat(33))
 }
@@ -48,7 +48,7 @@ describe('LiveTokenRateTracker', () => {
 
   it('稀疏文本 delta 算出合理速率', () => {
     const t = new LiveTokenRateTracker(SPEC)
-    // 1 秒内 100 token → 约 100 tok/s。
+    // 1 秒内约 99 token → 约 99 tok/s。
     for (let i = 0; i < 10; i += 1) {
       t.fold(SESSION, tenTokenFrame(), 1000 + i * 100)
     }
@@ -71,7 +71,7 @@ describe('LiveTokenRateTracker', () => {
     const t = new LiveTokenRateTracker(SPEC)
     // 老 burst 在 ~1s，共 10*99 ≈ 990 token，远超 3s 窗口。
     for (let i = 0; i < 10; i += 1) t.fold(SESSION, textDelta('a'.repeat(330)), 1000 + i)
-    // 新样本 10 token 于 10000ms。若老 burst 存活，速率 ≈ 1000/0.05 = 20000。
+    // 新样本约 9.9 token 于 10000ms。若老 burst 存活，速率 ≈ 1000/0.05 = 20000。
     t.fold(SESSION, tenTokenFrame(), 10000)
     const snap = t.snapshot(SESSION, 10000)
     expect(snap.tokensPerSecond!).toBeGreaterThan(50)
@@ -83,7 +83,7 @@ describe('LiveTokenRateTracker', () => {
     t.beginStep(SESSION, 1000)
     // 等待首字期：尚无样本，数学上未定义，不发假 0。
     expect(t.snapshot(SESSION, 1700).tokensPerSecond).toBeUndefined()
-    // 首字 2700ms 到达，TTFT 1.7s；10 帧共 100 token。
+    // 首字 2700ms 到达，TTFT 1.7s；10 帧共约 99 token。
     for (let i = 0; i < 10; i += 1) t.fold(SESSION, tenTokenFrame(), 2700 + i * 10)
     const snap = t.snapshot(SESSION, 2790)
     // span 为 2790-1000 与 3000 的较小值 1790ms，100/1.79 ≈ 55.9 tok/s。
@@ -94,12 +94,12 @@ describe('LiveTokenRateTracker', () => {
   it('流逝超过窗口后，分母固定为窗口定值，不再增长', () => {
     const t = new LiveTokenRateTracker(SPEC)
     t.beginStep(SESSION, 1000)
-    // 4000..5200ms 每 100ms 一帧，共 13 帧 = 130 token。
+    // 4000..5200ms 每 100ms 一帧，共 13 帧，每帧 9.9 token，合计 128.7。
     for (let i = 0; i < 13; i += 1) t.fold(SESSION, tenTokenFrame(), 4000 + i * 100)
     const snap = t.snapshot(SESSION, 6000)
-    // 分母为 5000 与 3000 的较小值 3000，窗口 3s 内全样本存活，130/3 ≈ 43.3 tok/s。
+    // 分母为 5000 与 3000 的较小值 3000，窗口 3s 内全样本存活，128.7/3 = 42.9 tok/s。
     expect(snap.tokensPerSecond).toBeDefined()
-    expect(snap.tokensPerSecond!).toBeCloseTo(130 / 3, 1)
+    expect(snap.tokensPerSecond!).toBeCloseTo(128.7 / 3, 1)
     // 同一批样本，推进 1s 后分母仍封顶 3000，速率不变，验证定值语义。
     const later = t.snapshot(SESSION, 7000)
     expect(later.tokensPerSecond).toBeCloseTo(snap.tokensPerSecond!, 1)
@@ -157,11 +157,11 @@ describe('LiveTokenRateTracker', () => {
     t.beginStep(SESSION, 1000)
     t.fold(SESSION, tenTokenFrame(), 1200)
     const before = t.snapshot(SESSION, 2200)
-    // usage 未到：输出是估算，exact 为假，首字延迟 200ms，平均速度 = 估算 10 token / 1.2s
-    expect(before.outputTokens).toBe(10)
+    // usage 未到：输出是估算，exact 为假，首字延迟 200ms，平均速度 = 估算 9.9 token / 1.2s
+    expect(before.outputTokens).toBeCloseTo(9.9)
     expect(before.exact).toBe(false)
     expect(before.firstTokenDelayMs).toBe(200)
-    expect(before.avgTokensPerSecond).toBeCloseTo(10 / 1.2, 5)
+    expect(before.avgTokensPerSecond).toBeCloseTo(9.9 / 1.2, 5)
     // usage 到达：输出切换为官方实际值，首字延迟不变，平均速度按实际值重算
     t.fold(SESSION, { type: 'usage', usage: { inputTokens: 0, outputTokens: 25 } } as unknown as StreamChunk, 2300)
     const after = t.snapshot(SESSION, 2300)

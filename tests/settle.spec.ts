@@ -59,12 +59,12 @@ describe('estimateAssistantMessage', () => {
     expect(r.exact).toBe(true)
   })
 
-  it('density 模式逐段取整，与实时通道同口径', () => {
+  it('density 模式逐段累加不取整，与实时通道同口径', () => {
     const r = estimateAssistantMessage({
       stream: [{ type: 'text-chunks', time0: 1010, index: 0, dt: [10], texts: ['hello', ' world'] }],
     }, DENSITY)
-    // 逐段 round(5*0.3)=2 与 round(6*0.3)=2 合计 4，而不是整段 round(11*0.3)=3；实时通道按帧累加即这个数
-    expect(r.estimated).toBe(4)
+    // 两段 5*0.3 与 6*0.3 直接累加为 3.3，不再逐段舍入成 2 与 2
+    expect(r.estimated).toBeCloseTo(3.3)
   })
 })
 

@@ -27,11 +27,11 @@ describe('countAsciiCjk', () => {
 })
 
 describe('estimateTextTokens', () => {
-  it('按密度比例折算', () => {
-    // 5 ASCII * 0.3 = 1.5 -> 2
-    expect(estimateTextTokens('hello', ESTIMATOR_DEFAULTS)).toBe(2)
-    // 2 CJK * 0.6 = 1.2 -> 1
-    expect(estimateTextTokens('中文', ESTIMATOR_DEFAULTS)).toBe(1)
+  it('按密度比例折算并保留未取整值', () => {
+    // 5 ASCII * 0.3 = 1.5，不在估算层取整
+    expect(estimateTextTokens('hello', ESTIMATOR_DEFAULTS)).toBeCloseTo(1.5)
+    // 2 CJK * 0.6 = 1.2
+    expect(estimateTextTokens('中文', ESTIMATOR_DEFAULTS)).toBeCloseTo(1.2)
   })
 
   it('CJK 比 ASCII 密度更高，单调', () => {
