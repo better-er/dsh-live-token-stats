@@ -37,6 +37,8 @@ export default defineConfig([
         '@deepseek-ai/dsh-session',
         '@deepseek-ai/dsh-session-projection',
       ],
+      // zod 是纯 npm 包宿主不提供，打进 host 产物，避免运行时依赖工作区的 node_modules。
+      alwaysBundle: (id) => id === 'zod',
     },
   },
   // 浏览器半身：src/client/index.ts 产出 lib/client.js，ModuleLoader 工厂。
