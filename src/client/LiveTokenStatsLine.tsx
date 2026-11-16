@@ -411,6 +411,36 @@ const PANEL_ANCHOR_STYLE = {
   left: 'clamp(12px, anchor(left), calc(100vw - 12px - min(440px, 100vw - 24px)))',
 } as unknown as CSSProperties
 
+/**
+ * 宿主浏览器是否支持 CSS Anchor Positioning，模块加载时求值一次。
+ *
+ * 这是对**标准 CSS 能力**的探测，不是对某个包私有导出的探测：后者一旦成立会让 peer/版本门禁
+ * 永久失效，把该报的破坏吞成静默降级；而标准能力的可用性由 Chromium 版本决定，跨宿主线稳定，
+ * 且本插件已不再依赖任何 primitives 定位导出，探测它不会掩盖任何契约。
+ * 宿主浏览器在一次应用生命周期内不变，故只定一次即可，无需订阅。
+ */
+const ANCHOR_POSITIONING_SUPPORTED =
+  typeof CSS !== 'undefined'
+  && typeof CSS.supports === 'function'
+  && CSS.supports('anchor-name: --dsh-live-token-stats-probe')
+
+/**
+ * 详情面板的降级定位：不支持 CSS Anchor Positioning 时使用。
+ *
+ * 视口底部居中、上抬让开 composer，不读任何矩形，因此不会与流式重渲染互相触发；
+ * 面板高度受限并可内部滚动，避免小视口下盖住输入框。
+ */
+const PANEL_NO_ANCHOR_STYLE: CSSProperties = {
+  left: '50%',
+  bottom: 'calc(var(--dsh-composer-height, 96px) + 12px)',
+  transform: 'translateX(-50%)',
+  maxHeight: 'min(440px, 60vh)',
+  overflowY: 'auto',
+}
+
+/** 面板最终定位：锚点可用时跟随胶囊，否则走底部居中兜底。两者都不读矩形。 */
+const PANEL_POSITION_STYLE = ANCHOR_POSITIONING_SUPPORTED ? PANEL_ANCHOR_STYLE : PANEL_NO_ANCHOR_STYLE
+
 /** 面板标题样式：照抄原生 bRhRbq_title。 */
 const TITLE_STYLE: CSSProperties = {
   color: 'var(--dsw-alias-label-primary)',
@@ -524,7 +554,7 @@ const LiveStatsPill = memo(function LiveStatsPill({
         <button
           ref={rootRef}
           type="button"
-          style={{ ...TRIGGER_ANCHOR_STYLE, ...(hovered || expanded ? { ...PILL_STYLE, ...PILL_ACTIVE_STYLE } : PILL_STYLE) }}
+          style={{ ...(ANCHOR_POSITIONING_SUPPORTED ? TRIGGER_ANCHOR_STYLE : {}), ...(hovered || expanded ? { ...PILL_STYLE, ...PILL_ACTIVE_STYLE } : PILL_STYLE) }}
           aria-haspopup={detailed ? 'dialog' : undefined}
           aria-expanded={detailed ? expanded : undefined}
           aria-label={items.map((item) => item.label + ' ' + item.value).join('，')}
@@ -541,7 +571,7 @@ const LiveStatsPill = memo(function LiveStatsPill({
           ref={panelRef}
           role="dialog"
           aria-label="实时 token 统计"
-          style={{ ...PANEL_STYLE, ...PANEL_ANCHOR_STYLE }}
+          style={{ ...PANEL_STYLE, ...PANEL_POSITION_STYLE }}
         >
           <div style={TITLE_STYLE}>
             <span style={TITLE_LABEL_STYLE}>
