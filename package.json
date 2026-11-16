@@ -50,9 +50,9 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
-    "@deepseek-ai/dsh": "^0.2.2-rc.3",
-    "@deepseek-ai/dsh-client-connection": "^0.2.2-rc.3",
-    "@deepseek-ai/dsh-client-ui-primitives": "^0.2.2-rc.3",
+    "@deepseek-ai/dsh": ">=0.2.2-rc.2 <0.3.0-0",
+    "@deepseek-ai/dsh-client-connection": ">=0.2.2-rc.2 <0.3.0-0",
+    "@deepseek-ai/dsh-client-ui-primitives": ">=0.2.2-rc.2 <0.3.0-0",
     "@deepseek-ai/schemastery": "~3.19.0"
   },
   "devDependencies": {
