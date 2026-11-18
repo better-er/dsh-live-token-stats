@@ -99,6 +99,7 @@ dsh plugin --profile web remove dsh-live-token-stats
 ## 要求与开发
 
 - 是**标准形态的 dsh 客户端加主机双半身插件**，host 提供数据服务，`./client` 提供 UI。
+- 要求 **dsh 0.2.2 及以上**：详情面板用 CSS 锚点定位（`anchor-name` / `position-anchor` 加 `@position-try` 翻面），对齐 dsh 0.2.2-alpha.2 移除 `useAnchoredPosition` 后的官方做法。
 - 同时声明了 `dsh.bundle`，因此也是一个**自挂载的 bundle 层插件**：用 `dsh plugin --profile <name> add` 安装后，会被自动识别为 profile layer 并挂载，无需手工写组合 entry。
 - 纯插件自包含，不改 DSH 源码。
 - 构建：`pnpm install` 后依次执行 `pnpm typecheck`、`pnpm test`、`pnpm build`；源码在 `src/`，发布产物在 `lib/`，由 tsdown 构建，运行时加载的是 lib。

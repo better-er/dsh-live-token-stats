@@ -16,7 +16,7 @@
  * @module dsh-live-token-stats/client
  */
 
-import { Fragment, memo, useEffect, useRef, useState } from 'react'
+import { Fragment, memo, useEffect, useId, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { CSSProperties, ReactNode } from 'react'
 import {
@@ -25,7 +25,6 @@ import {
   IconDatabaseOutlineRegular,
   IconGaugeOutlineRegular,
   IconPauseOutlineRegular,
-  useAnchoredPosition,
   useDismissOnOutsidePointer,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { UseProjection } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -298,8 +297,9 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
  * 胶囊内是图标加标签，标签里用 aria-hidden 的 `·` 分隔两个固定槽位——速度或首字延迟，以及输出；
  * 其余读数收进点击后弹出的详情面板，槽位固定后宽度只在数值本身浮动。
  * 这样流式读数再怎么变，外显宽度只在两个数字上浮动，不会再整行左右平移。
- * 面板的定位与关闭复用 primitives 的 useAnchoredPosition 与 useDismissOnOutsidePointer，
- * 外观逐条照抄原生的 stat-dialog 样式，与原生统计胶囊是同一套观感。
+ * 面板经 CSS 锚点定位（anchor-name/position-anchor）贴合胶囊上沿，越界由 position-try-fallbacks 翻面；
+ * 关闭复用 primitives 的 useDismissOnOutsidePointer，外观逐条照抄原生的 stat-dialog 样式，
+ * 与原生统计胶囊是同一套观感。
  */
 
 /** 分隔符 span 的样式：照抄原生 bOPqQW_sep。 */
@@ -369,15 +369,69 @@ const ROOT_STYLE: CSSProperties = {
   whiteSpace: 'nowrap',
 }
 
-/** 面板样式：照抄原生 bRhRbq_panel。 */
+/**
+ * 面板翻面回退：`@position-try` 只能写在样式表里，故随模块加载注入一次插件自有样式。
+ *
+ * 只有五条 at-rule，不带任何选择器，只对引用了这些名字的面板生效，不触碰 DSH 其他界面。
+ * 取值逐条照抄原生 stat-dialog 的 @position-try，把 8px 间距换成胶囊原本的 6px。
+ */
+const PANEL_STYLE_ID = 'dsh-live-token-stats-position'
+const PANEL_FALLBACKS = '--dsh-live-token-stats-window, --dsh-live-token-stats-opposite, --dsh-live-token-stats-wide-opposite, --dsh-live-token-stats-tall, --dsh-live-token-stats-viewport'
+
+if (typeof document !== 'undefined' && document.getElementById(PANEL_STYLE_ID) === null) {
+  const style = document.createElement('style')
+  style.id = PANEL_STYLE_ID
+  style.textContent = `
+@position-try --dsh-live-token-stats-window {
+  position-area: none;
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: max(12px, calc(anchor(top) + 6px));
+  left: 12px;
+  right: 12px;
+  align-self: safe end;
+  justify-self: safe end;
+}
+@position-try --dsh-live-token-stats-opposite {
+  top: max(12px, calc(anchor(bottom) + 6px));
+  bottom: 12px;
+  align-self: start;
+}
+@position-try --dsh-live-token-stats-wide-opposite {
+  top: max(12px, calc(anchor(bottom) + 6px));
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  align-self: start;
+  justify-self: safe end;
+}
+@position-try --dsh-live-token-stats-tall {
+  position-area: none;
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: 12px;
+  left: max(12px, anchor(left));
+  right: 12px;
+  align-self: safe start;
+  justify-self: start;
+}
+@position-try --dsh-live-token-stats-viewport {
+  position-area: none;
+  inset: max(12px, var(--dsh-frame-overlay-top, 12px)) 12px 12px;
+  align-self: safe start;
+  justify-self: safe end;
+}
+`
+  document.head.append(style)
+}
+
+/** 面板样式：照抄原生 bRhRbq_panel，定位改用 CSS 锚点贴在触发胶囊上沿。 */
 const PANEL_STYLE = {
   zIndex: 1100,
   boxSizing: 'border-box',
   borderRadius: 'var(--dsw-radius-lg)',
   background: 'var(--dsw-specific-menu)',
   width: 'max-content',
-  minWidth: 'min(300px, 100vw - 24px)',
-  maxWidth: 'min(440px, 100vw - 24px)',
+  minWidth: 'min(300px, calc(100vw - 24px))',
+  maxWidth: 'min(440px, calc(100vw - 24px))',
   backdropFilter: 'var(--dsw-menu-backdrop-filter)',
   '--dsw-elevation-stroke-color': 'var(--dsw-alias-border-l1)',
   boxShadow: 'var(--dsw-elevation-prominent)',
@@ -388,14 +442,25 @@ const PANEL_STYLE = {
   fontSize: 12,
   lineHeight: '18px',
   position: 'fixed',
+  // 与原生 stat-dialog 同一条锚点定位：上下左右四条内缩，height fit-content 加 align-self end
+  // 让面板贴着胶囊上沿留 6px；越界时由 position-try-fallbacks 依次翻面、加宽、最后收进视口。
+  positionArea: 'none',
+  top: 'max(12px, var(--dsh-frame-overlay-top, 12px))',
+  bottom: 'max(12px, calc(anchor(top) + 6px))',
+  left: 'max(12px, anchor(left))',
+  right: '12px',
+  positionTryFallbacks: PANEL_FALLBACKS,
+  alignSelf: 'end',
+  justifySelf: 'start',
+  height: 'fit-content',
+  minHeight: 0,
+  margin: 0,
+  maxHeight: 'calc(100dvh - 12px - max(12px, var(--dsh-frame-overlay-top, 12px)))',
+  overflowX: 'hidden',
+  overflowY: 'auto',
+  '--dsh-scrollbar-thumb': 'var(--dsw-alias-scrollbar-bg-l2)',
+  '--dsh-scrollbar-thumb-hover': 'var(--dsw-alias-scrollbar-hover-l2)',
 } as CSSProperties
-
-/** 尚未测出坐标时的面板样式：隐藏但参与布局，供定位测量真实尺寸。照抄原生 MEASURE_STYLE。 */
-const MEASURE_STYLE: CSSProperties = {
-  visibility: 'hidden',
-  left: 0,
-  top: 0,
-}
 
 /** 面板标题样式：照抄原生 bRhRbq_title。 */
 const TITLE_STYLE: CSSProperties = {
@@ -484,7 +549,8 @@ const LiveStatsPill = memo(function LiveStatsPill({
   const rootRef = useRef<HTMLButtonElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const expanded = detailed && open
-  const anchor = useAnchoredPosition({ open: expanded, anchorRef: rootRef, panelRef, side: 'top', gap: 6, margin: 8 })
+  // 每个胶囊一个唯一锚点名：触发胶囊与 portal 出去的面板靠它配对，无需 JS 量坐标。
+  const anchorName = `--dsh-live-token-stats-${useId().replaceAll(':', '')}`
   useDismissOnOutsidePointer(rootRef, expanded, setOpen, panelRef)
 
   useEffect(() => {
@@ -507,7 +573,7 @@ const LiveStatsPill = memo(function LiveStatsPill({
 
   return (
     <div data-dsh-live-token-stats="true" style={ROOT_STYLE}>
-      <span style={ANCHOR_STYLE}>
+      <span style={{ ...ANCHOR_STYLE, anchorName }}>
         <button
           ref={rootRef}
           type="button"
@@ -528,7 +594,7 @@ const LiveStatsPill = memo(function LiveStatsPill({
           ref={panelRef}
           role="dialog"
           aria-label="实时 token 统计"
-          style={anchor === null ? { ...PANEL_STYLE, ...MEASURE_STYLE } : { ...PANEL_STYLE, ...anchor }}
+          style={{ ...PANEL_STYLE, positionAnchor: anchorName }}
         >
           <div style={TITLE_STYLE}>
             <span style={TITLE_LABEL_STYLE}>

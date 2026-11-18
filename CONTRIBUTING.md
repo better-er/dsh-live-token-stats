@@ -11,7 +11,7 @@
 
 ## 环境
 
-- Node ≥ 26.3.1，pnpm 9.15.9，锁文件 `pnpm-lock.yaml` 为 lockfileVersion 9。
+- Node ≥ 24.9.0（与 `package.json` 的 `engines` 及 dsh 运行时一致；CI 用 26.3.1），pnpm 9.15.9，锁文件 `pnpm-lock.yaml` 为 lockfileVersion 9。
 - 首次：`pnpm install`，用 `--frozen-lockfile` 保证与锁文件一致。
 - 仓库根 `.npmrc` 写了 `auto-install-peers=false`：`peerDependencies` 只作 dsh 的兼容门禁，不参与本地安装；源码 import 的包都在 `devDependencies` 里显式声明。
 

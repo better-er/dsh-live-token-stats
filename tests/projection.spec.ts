@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   activeStepApply,
   createLiveTokenStatsDefinition,
-  type ActiveStepState,
+  type LiveTokenStatsProjection,
 } from '../src/projection.ts'
 import type { SessionEvent, SessionHeader, SessionLogOffset } from '@deepseek-ai/dsh-session'
 
@@ -42,7 +42,7 @@ function stepEnd(seq: number, turn = 0, step = 0, time = 1000 + seq * 10): Sessi
   return event(seq, 'step/end', { turn, step }, time)
 }
 
-const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null }
+const ACTIVE_INIT: LiveTokenStatsProjection = { active: null, lastSettled: null }
 
 describe('activeStepApply', () => {
   it('step/start 打开一个 step', () => {
@@ -117,10 +117,10 @@ describe('activeStepApply', () => {
 })
 
 describe('createLiveTokenStatsDefinition', () => {
-  it('是可重放投影，stateVersion 为 8，状态只含时间线', () => {
+  it('是可重放投影，stateVersion 为 9，状态只含时间线', () => {
     const def = createLiveTokenStatsDefinition()
     expect(def.key).toBe('liveTokenStats')
-    expect(def.stateVersion).toBe(8)
+    expect(def.stateVersion).toBe(9)
     const init = def.init(HEADER, NO_INHERIT)
     expect(def.wire!.view(init)).toEqual({ active: null, lastSettled: null })
     // 持久化状态必须能过 stateSchema，这是缓存恢复的前提
