@@ -25,7 +25,6 @@ import {
   IconDatabaseOutlineRegular,
   IconGaugeOutlineRegular,
   IconPauseOutlineRegular,
-  useAnchoredPosition,
   useDismissOnOutsidePointer,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { UseProjection } from '@deepseek-ai/dsh-api-session-controller/client'
@@ -298,7 +297,7 @@ export const LiveTokenStatsLine = memo(function LiveTokenStatsLine({
  * 胶囊内是图标加标签，标签里用 aria-hidden 的 `·` 分隔两个固定槽位——速度或首字延迟，以及输出；
  * 其余读数收进点击后弹出的详情面板，槽位固定后宽度只在数值本身浮动。
  * 这样流式读数再怎么变，外显宽度只在两个数字上浮动，不会再整行左右平移。
- * 面板的定位与关闭复用 primitives 的 useAnchoredPosition 与 useDismissOnOutsidePointer，
+ * 面板的定位用 CSS Anchor Positioning 跟随胶囊，关闭复用 primitives 的 useDismissOnOutsidePointer，
  * 外观逐条照抄原生的 stat-dialog 样式，与原生统计胶囊是同一套观感。
  */
 
@@ -375,7 +374,7 @@ const PANEL_STYLE = {
   boxSizing: 'border-box',
   borderRadius: 'var(--dsw-radius-lg)',
   background: 'var(--dsw-specific-menu)',
-  width: 'max-content',
+  width: 'fit-content',
   minWidth: 'min(300px, 100vw - 24px)',
   maxWidth: 'min(440px, 100vw - 24px)',
   backdropFilter: 'var(--dsw-menu-backdrop-filter)',
@@ -390,12 +389,27 @@ const PANEL_STYLE = {
   position: 'fixed',
 } as CSSProperties
 
-/** 尚未测出坐标时的面板样式：隐藏但参与布局，供定位测量真实尺寸。照抄原生 MEASURE_STYLE。 */
-const MEASURE_STYLE: CSSProperties = {
-  visibility: 'hidden',
-  left: 0,
-  top: 0,
-}
+/** 触发按钮的锚点名称：详情面板用它跟随胶囊，不读写任何矩形。 */
+const ANCHOR_NAME = '--dsh-live-token-stats-anchor'
+
+/**
+ * 触发按钮的锚点声明。
+ *
+ * anchorName 尚未进入 React 的 CSSProperties 类型，故断言。
+ */
+const TRIGGER_ANCHOR_STYLE = { anchorName: ANCHOR_NAME } as unknown as CSSProperties
+
+/**
+ * 详情面板的锚点定位，照抄官方模型选择器菜单。
+ *
+ * 面板贴胶囊上方 6px，左缘跟随胶囊左缘并夹在布局视口 12px 内；
+ * 左缘的上限按面板最大宽度从右侧留出 12px 反推，因此不会向右溢出。不读矩形、不追视口变化。
+ */
+const PANEL_ANCHOR_STYLE = {
+  positionAnchor: ANCHOR_NAME,
+  bottom: 'calc(anchor(top) + 6px)',
+  left: 'clamp(12px, anchor(left), calc(100vw - 12px - min(440px, 100vw - 24px)))',
+} as unknown as CSSProperties
 
 /** 面板标题样式：照抄原生 bRhRbq_title。 */
 const TITLE_STYLE: CSSProperties = {
@@ -484,7 +498,6 @@ const LiveStatsPill = memo(function LiveStatsPill({
   const rootRef = useRef<HTMLButtonElement | null>(null)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const expanded = detailed && open
-  const anchor = useAnchoredPosition({ open: expanded, anchorRef: rootRef, panelRef, side: 'top', gap: 6, margin: 8 })
   useDismissOnOutsidePointer(rootRef, expanded, setOpen, panelRef)
 
   useEffect(() => {
@@ -511,7 +524,7 @@ const LiveStatsPill = memo(function LiveStatsPill({
         <button
           ref={rootRef}
           type="button"
-          style={hovered || expanded ? { ...PILL_STYLE, ...PILL_ACTIVE_STYLE } : PILL_STYLE}
+          style={{ ...TRIGGER_ANCHOR_STYLE, ...(hovered || expanded ? { ...PILL_STYLE, ...PILL_ACTIVE_STYLE } : PILL_STYLE) }}
           aria-haspopup={detailed ? 'dialog' : undefined}
           aria-expanded={detailed ? expanded : undefined}
           aria-label={items.map((item) => item.label + ' ' + item.value).join('，')}
@@ -528,7 +541,7 @@ const LiveStatsPill = memo(function LiveStatsPill({
           ref={panelRef}
           role="dialog"
           aria-label="实时 token 统计"
-          style={anchor === null ? { ...PANEL_STYLE, ...MEASURE_STYLE } : { ...PANEL_STYLE, ...anchor }}
+          style={{ ...PANEL_STYLE, ...PANEL_ANCHOR_STYLE }}
         >
           <div style={TITLE_STYLE}>
             <span style={TITLE_LABEL_STYLE}>
