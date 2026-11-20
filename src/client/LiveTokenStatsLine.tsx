@@ -387,6 +387,8 @@ const PANEL_STYLE = {
   fontSize: 12,
   lineHeight: '18px',
   position: 'fixed',
+  '--dsh-scrollbar-thumb': 'var(--dsw-alias-scrollbar-bg-l2)',
+  '--dsh-scrollbar-thumb-hover': 'var(--dsw-alias-scrollbar-hover-l2)',
 } as CSSProperties
 
 /** 触发按钮的锚点名称：详情面板用它跟随胶囊，不读写任何矩形。 */
@@ -400,15 +402,85 @@ const ANCHOR_NAME = '--dsh-live-token-stats-anchor'
 const TRIGGER_ANCHOR_STYLE = { anchorName: ANCHOR_NAME } as unknown as CSSProperties
 
 /**
- * 详情面板的锚点定位，照抄官方模型选择器菜单。
+ * 面板翻面回退，顺序即尝试顺序：先收进视口，再翻到胶囊下方，最后铺满可用高度。
  *
- * 面板贴胶囊上方 6px，左缘跟随胶囊左缘并夹在布局视口 12px 内；
- * 左缘的上限按面板最大宽度从右侧留出 12px 反推，因此不会向右溢出。不读矩形、不追视口变化。
+ * `@position-try` 只能写在样式表里，故随模块加载注入一次插件自有样式。
+ * 五条 at-rule 不带任何选择器，只对引用了这些名字的面板生效，不触碰 DSH 其他界面；
+ * 取值逐条照抄原生 ContextMeter 的 @position-try，把 8px 间距换成胶囊原本的 6px。
+ */
+const PANEL_STYLE_ID = 'dsh-live-token-stats-position'
+const PANEL_FALLBACKS = '--dsh-live-token-stats-window, --dsh-live-token-stats-opposite, --dsh-live-token-stats-wide-opposite, --dsh-live-token-stats-tall, --dsh-live-token-stats-viewport'
+
+if (typeof document !== 'undefined' && document.getElementById(PANEL_STYLE_ID) === null) {
+  const style = document.createElement('style')
+  style.id = PANEL_STYLE_ID
+  style.textContent = `
+@position-try --dsh-live-token-stats-window {
+  position-area: none;
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: max(12px, calc(anchor(top) + 6px));
+  left: 12px;
+  right: 12px;
+  margin: 0;
+  align-self: safe end;
+  justify-self: safe end;
+}
+@position-try --dsh-live-token-stats-opposite {
+  top: max(12px, calc(anchor(bottom) + 6px));
+  bottom: 12px;
+  align-self: start;
+}
+@position-try --dsh-live-token-stats-wide-opposite {
+  top: max(12px, calc(anchor(bottom) + 6px));
+  bottom: 12px;
+  left: 12px;
+  right: 12px;
+  align-self: start;
+  justify-self: safe end;
+}
+@position-try --dsh-live-token-stats-tall {
+  position-area: none;
+  top: max(12px, var(--dsh-frame-overlay-top, 12px));
+  bottom: 12px;
+  left: max(12px, anchor(left));
+  right: 12px;
+  margin: 0;
+  align-self: safe start;
+  justify-self: start;
+}
+@position-try --dsh-live-token-stats-viewport {
+  position-area: none;
+  inset: max(12px, var(--dsh-frame-overlay-top, 12px)) 12px 12px;
+  margin: 0;
+  align-self: safe start;
+  justify-self: safe end;
+}
+`
+  document.head.append(style)
+}
+
+/**
+ * 详情面板的锚点定位与越界约束，照抄官方 ContextMeter 的 .panel。
+ *
+ * 上下两条内缩撑满胶囊上方的可用高度，height fit-content 配 align-self end 让内容不足时仍贴胶囊上沿 6px；
+ * 内容超出则在 maxHeight 处截断并纵向滚动，因此矮窗口下也不会顶出屏幕。
+ * 左缘跟随胶囊并夹进布局视口，上限按面板最大宽度从右侧反推，因此不会向右溢出。不读矩形、不追视口变化。
+ * 胶囊太靠窗口上沿、上方放不下时，position-try-fallbacks 依次翻到下方、加宽、最后铺满视口。
  */
 const PANEL_ANCHOR_STYLE = {
   positionAnchor: ANCHOR_NAME,
+  top: 'max(12px, var(--dsh-frame-overlay-top, 12px))',
   bottom: 'calc(anchor(top) + 6px)',
   left: 'clamp(12px, anchor(left), calc(100vw - 12px - min(440px, 100vw - 24px)))',
+  positionTryFallbacks: PANEL_FALLBACKS,
+  height: 'fit-content',
+  minHeight: 0,
+  maxHeight: 'calc(100dvh - 12px - max(12px, var(--dsh-frame-overlay-top, 12px)))',
+  alignSelf: 'end',
+  justifySelf: 'start',
+  margin: 0,
+  overflowX: 'hidden',
+  overflowY: 'auto',
 } as unknown as CSSProperties
 
 /** 面板标题样式：照抄原生 bRhRbq_title。 */
