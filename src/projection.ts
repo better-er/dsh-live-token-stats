@@ -21,10 +21,6 @@ declare module '@deepseek-ai/dsh-session-projection/types' {
     /** 当前正在流式输出或刚结算步骤的实时与时间性 token 数据。 */
     liveTokenStats: LiveTokenStatsProjection
   }
-  interface SessionProjectionStateMap {
-    /** 支撑 liveTokenStats 客户端视图的持久化折叠状态。 */
-    liveTokenStats: LiveTokenStatsState
-  }
 }
 
 /** 一步的 token 时间线，输出估算由 host 单独提供，投影不持有。 */
@@ -41,7 +37,7 @@ export interface LiveStepFacts {
   exact: boolean
 }
 
-/** 为 liveTokenStats key 提供的线上值。 */
+/** 为 liveTokenStats key 提供的线上值，同时也是持久化的折叠状态。 */
 export interface LiveTokenStatsProjection {
   /** 当前正在流式输出的步骤，空闲时为 null。 */
   active: LiveStepFacts | null
@@ -49,30 +45,21 @@ export interface LiveTokenStatsProjection {
   lastSettled: (LiveStepFacts & { endTime: number }) | null
 }
 
-/** 整个投影的不可变纯 JSON 状态。 */
-export interface LiveTokenStatsState {
-  activeStep: ActiveStepState
-}
-
 // --- ActiveStep metric ------------------------------------------------------
-
-export interface ActiveStepState {
-  active: LiveTokenStatsProjection['active']
-  lastSettled: LiveTokenStatsProjection['lastSettled']
-}
 
 /** 设置首字时间，仅在尚未记录时生效。 */
 function withFirstToken(active: LiveStepFacts, time: number): LiveStepFacts {
   return active.firstTokenTime === null ? { ...active, firstTokenTime: time } : active
 }
 
-const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null }
+/** 空状态的字段模板；init() 每次返回新对象，不给下游留下原地修改共享状态的机会。 */
+const EMPTY_STATE: LiveTokenStatsProjection = { active: null, lastSettled: null }
 
 /**
  * 活跃步骤指标单元的纯折叠。
  * 只维护时间戳与官方 usage，不解析文本、不持有原文；输出估算由 host 另行提供。
  */
-export function activeStepApply(state: ActiveStepState, event: SessionEvent): ActiveStepState {
+export function activeStepApply(state: LiveTokenStatsProjection, event: SessionEvent): LiveTokenStatsProjection {
   const { type, data } = event
 
   if (type === 'step/start') {
@@ -130,11 +117,6 @@ export function activeStepApply(state: ActiveStepState, event: SessionEvent): Ac
   return state
 }
 
-/** 活跃步骤指标的视图切片。 */
-export function activeStepView(state: ActiveStepState): Pick<LiveTokenStatsProjection, 'active' | 'lastSettled'> {
-  return { active: state.active, lastSettled: state.lastSettled }
-}
-
 // --- Projection container ---------------------------------------------------
 
 const activeSchema = z.object({
@@ -156,23 +138,14 @@ const lastSettledSchema = z.object({
   endTime: z.number(),
 }).strict()
 
-const viewSchema = z.object({
-  active: activeSchema.nullable(),
-  lastSettled: lastSettledSchema.nullable(),
-}).strict()
-
-const activeStepStateSchema = z.object({
-  active: activeSchema.nullable(),
-  lastSettled: lastSettledSchema.nullable(),
-}).strict()
-
-/** 在用它播种一次缓存恢复前校验持久化的折叠状态。 */
+/** 线上值与持久化状态同为 {@link LiveTokenStatsProjection}，一份 schema 两处共用。 */
 const stateSchema = z.object({
-  activeStep: activeStepStateSchema,
+  active: activeSchema.nullable(),
+  lastSettled: lastSettledSchema.nullable(),
 }).strict()
 
-function init(): LiveTokenStatsState {
-  return { activeStep: { ...ACTIVE_INIT } }
+function init(): LiveTokenStatsProjection {
+  return { ...EMPTY_STATE }
 }
 
 /**
@@ -180,10 +153,10 @@ function init(): LiveTokenStatsState {
  * SessionProjectionMap 里的 key 必须有 wire。
  */
 export type LiveTokenStatsDefinition = Omit<
-  ProjectionDefinition<'liveTokenStats', LiveTokenStatsState>,
+  ProjectionDefinition<'liveTokenStats', LiveTokenStatsProjection>,
   'wire'
 > & {
-  wire: NonNullable<ProjectionDefinition<'liveTokenStats', LiveTokenStatsState>['wire']>
+  wire: NonNullable<ProjectionDefinition<'liveTokenStats', LiveTokenStatsProjection>['wire']>
 }
 
 /**
@@ -196,14 +169,11 @@ export function createLiveTokenStatsDefinition(): LiveTokenStatsDefinition {
     key: 'liveTokenStats',
     stateSchema,
     init,
-    apply: (state, event) => {
-      const nextActive = activeStepApply(state.activeStep, event)
-      if (nextActive === state.activeStep) return state
-      return { activeStep: nextActive }
-    },
+    apply: activeStepApply,
     wire: {
-      viewSchema,
-      view: (state) => activeStepView(state.activeStep),
+      viewSchema: stateSchema,
+      // 状态形状与线上值一致，view 不再做拆包投影；发布门控仍在注册表。
+      view: (state) => state,
     },
     // 仅当序列化状态字段或折叠语义变化时才递增。
     // v4：tool-call 参数反转义，esc 状态——官方按解码后内容计费。
@@ -211,6 +181,7 @@ export function createLiveTokenStatsDefinition(): LiveTokenStatsDefinition {
     // v6：dsh 0.1.5-rc.2 的 v2 事件模型把流式增量打包进 assistant/message.stream，改从该字段折算。
     // v7：移除无消费者的 tokensPerSecond，实时速度由主机 llm/stream 快照提供。
     // v8：分词与原文整体移出投影，只留时间戳与官方 usage；结算估算由 host 对最后一条 assistant/message 算一次。
-    stateVersion: 8,
+    // v9：去掉 activeStep 包层，状态与线上值合并为同一形状，视图直接返回状态。
+    stateVersion: 9,
   }
 }
