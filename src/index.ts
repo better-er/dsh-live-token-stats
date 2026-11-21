@@ -64,9 +64,10 @@ export function apply(ctx: Context, config: Config = {}): void {
   // 调试日志：配置开关优先，环境变量兜底，免改配置的开发快捷方式。
   const debug = debugConfig === true || process.env.DSH_LIVE_TOKEN_STATS_DEBUG === '1'
 
-  // 其一：可重放的结算投影，处理会话事件。
-  ctx.inject(['sessionProjections'], (projectionCtx) => {
-    projectionCtx.sessionProjections.register(createLiveTokenStatsDefinition())
+  // 其一：可重放的结算投影，处理会话事件。register 返回兼容 thenable，await 拿到真正的 handle；
+  // 不等它则拿不到 handle，失败只能靠库的兜底日志，错误也不会进入本插件 fiber。
+  ctx.inject(['sessionProjections'], async (projectionCtx) => {
+    await projectionCtx.sessionProjections.register(createLiveTokenStatsDefinition())
   })
 
   // 其二：实时通道，拦截 llm/stream 并提供 RPC。
@@ -76,6 +77,6 @@ export function apply(ctx: Context, config: Config = {}): void {
 
 export { resolveSpec, ESTIMATOR_DEFAULTS } from './estimator.ts'
 export { createLiveTokenStatsDefinition } from './projection.ts'
-export type { LiveTokenStatsProjection, LiveTokenStatsState } from './projection.ts'
+export type { LiveTokenStatsProjection } from './projection.ts'
 export { LiveTokenRateTracker, installHostLiveStream } from './live-stream.ts'
 export type { LiveTokenSnapshot } from './live-stream.ts'
