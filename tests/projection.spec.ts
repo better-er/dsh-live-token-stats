@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   activeStepApply,
   createLiveTokenStatsDefinition,
-  type ActiveStepState,
+  type LiveTokenStatsProjection,
 } from '../src/projection.ts'
 import type { SessionEvent, SessionHeader, SessionLogOffset } from '@deepseek-ai/dsh-session'
 
@@ -42,7 +42,7 @@ function stepEnd(seq: number, turn = 0, step = 0, time = 1000 + seq * 10): Sessi
   return event(seq, 'step/end', { turn, step }, time)
 }
 
-const ACTIVE_INIT: ActiveStepState = { active: null, lastSettled: null }
+const ACTIVE_INIT: LiveTokenStatsProjection = { active: null, lastSettled: null }
 
 describe('activeStepApply', () => {
   it('step/start 打开一个 step', () => {
@@ -117,10 +117,10 @@ describe('activeStepApply', () => {
 })
 
 describe('createLiveTokenStatsDefinition', () => {
-  it('是可重放投影，stateVersion 为 8，状态只含时间线', () => {
+  it('是可重放投影，stateVersion 为 9，状态只含时间线', () => {
     const def = createLiveTokenStatsDefinition()
     expect(def.key).toBe('liveTokenStats')
-    expect(def.stateVersion).toBe(8)
+    expect(def.stateVersion).toBe(9)
     const init = def.init(HEADER, NO_INHERIT)
     expect(def.wire!.view(init)).toEqual({ active: null, lastSettled: null })
     // 持久化状态必须能过 stateSchema，这是缓存恢复的前提
@@ -139,6 +139,21 @@ describe('createLiveTokenStatsDefinition', () => {
     const parsed = def.wire!.viewSchema.parse(value)
     expect(parsed.active!.firstTokenTime).toBe(1010)
     expect(parsed.active!.actualTokens).toBe(9)
+  })
+
+  it('init 每次返回独立的新对象，不共享空状态', () => {
+    const def = createLiveTokenStatsDefinition()
+    const a = def.init(HEADER, NO_INHERIT)
+    const b = def.init(HEADER, NO_INHERIT)
+    expect(a).toEqual({ active: null, lastSettled: null })
+    expect(b).toEqual({ active: null, lastSettled: null })
+    expect(a).not.toBe(b)
+  })
+
+  it('无关事件返回同一引用，避免触发注册表的视图计算', () => {
+    const def = createLiveTokenStatsDefinition()
+    const state = def.apply(def.init(HEADER, NO_INHERIT), stepStart(0))
+    expect(def.apply(state, event(1, 'turn/end', { turn: 0 }))).toBe(state)
   })
 })
 
