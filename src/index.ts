@@ -64,8 +64,8 @@ export function apply(ctx: Context, config: Config = {}): void {
   // 调试日志：配置开关优先，环境变量兜底，免改配置的开发快捷方式。
   const debug = debugConfig === true || process.env.DSH_LIVE_TOKEN_STATS_DEBUG === '1'
 
-  // 其一：可重放的结算投影，处理会话事件。register 返回兼容 thenable，await 拿到真正的 handle；
-  // 不等它则拿不到 handle，失败只能靠库的兜底日志，错误也不会进入本插件 fiber。
+  // 其一：可重放的结算投影，处理会话事件。register 返回兼容 thenable，
+  // 不 await 则注册失败只落在库的兜底日志里，错误不会进入本插件 fiber。
   ctx.inject(['sessionProjections'], async (projectionCtx) => {
     await projectionCtx.sessionProjections.register(createLiveTokenStatsDefinition())
   })
